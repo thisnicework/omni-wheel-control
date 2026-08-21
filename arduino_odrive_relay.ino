@@ -2,12 +2,13 @@
  * arduino_odrive_relay.ino
  * 
  * Target MCU: Arduino Uno R4 WiFi
- * Purpose: Dual ODrive v3.6 Relay with Continuous 20Hz Velocity Control Loop.
+ * Purpose: Dual ODrive v3.6 Relay with Direct Render Cloud Integration (omni-wheel-control.onrender.com).
  * 
- * Fixes:
- *   - Continuous 20Hz velocity output stream in loop() for both Manual WASD & Auto-Roam modes.
- *   - Prevents single-keypress velocity dropouts or ODrive command timeouts.
- *   - Dual ODrive initialization (Clear errors -> Idle -> Vel Control -> Passthrough -> Closed Loop).
+ * Architecture:
+ *   - Wi-Fi Connection via WiFiS3 to "sanhak"
+ *   - Render Cloud HTTPS GET /api/cmd via WiFiSSLClient (Port 443)
+ *   - Zero configuration needed: Automatically connects to omni-wheel-control.onrender.com
+ *   - Continuous 20Hz ODrive Velocity Control Stream
  */
 
 #include <Arduino.h>
@@ -22,10 +23,9 @@
 const char* WIFI_SSID = "sanhak";      // Wi-Fi SSID
 const char* WIFI_PASS = "20020520";  // Wi-Fi Password
 
-// --- SUPABASE CLOUD CONFIGURATION ---
-const char* SUPABASE_HOST     = "your-project-id.supabase.co"; // e.g. "xyz123.supabase.co"
-const char* SUPABASE_ANON_KEY = "YOUR_SUPABASE_ANON_KEY";       // Your Supabase Anon Key
-const int   SUPABASE_PORT     = 443;
+// --- RENDER CLOUD HOST CONFIGURATION ---
+const char* RENDER_HOST = "omni-wheel-control.onrender.com";
+const int   RENDER_PORT = 443;
 
 WiFiSSLClient sslClient;
 
@@ -36,9 +36,9 @@ SoftwareSerial odriveRear(9, 8);
 const unsigned long POLLING_INTERVAL_US = 20000;
 unsigned long lastPollMicros = 0;
 
-// Supabase Cloud Command Polling (300ms)
-const unsigned long SUPABASE_POLL_INTERVAL_MS = 300;
-unsigned long lastSupabasePollMs = 0;
+// Render Cloud Command Polling (200ms)
+const unsigned long RENDER_POLL_INTERVAL_MS = 200;
+unsigned long lastRenderPollMs = 0;
 
 // 20Hz Continuous Velocity Update Loop (50ms)
 const unsigned long ROAM_INTERVAL_MS = 50;
@@ -88,7 +88,7 @@ uint8_t axisQueryRear = 0;
 
 // Function Prototypes
 void connectToWiFi();
-void pollSupabaseCloud();
+void pollRenderCloud();
 void printStatusHeartbeat();
 void setupODriveFront();
 void setupODriveRear();
@@ -113,7 +113,7 @@ void setup() {
     delay(1000);
 
     Serial.println("\n==================================================");
-    Serial.println("  🤖 Arduino Uno R4 WiFi - Dual ODrive System     ");
+    Serial.println("  🤖 Arduino Uno R4 WiFi - Render Cloud System    ");
     Serial.println("==================================================");
 
     // Initialize ODrives into Closed Loop Velocity Control
@@ -128,7 +128,7 @@ void setup() {
     connectToWiFi();
 
     Serial.println("==================================================");
-    Serial.println("▶️ Ready! Send commands via WASD, Web UI, or Supabase.");
+    Serial.println("▶️ Ready! Controlled via https://omni-wheel-control.onrender.com");
     Serial.println("==================================================\n");
 }
 
@@ -136,13 +136,13 @@ void loop() {
     unsigned long currentMicros = micros();
     unsigned long currentMs = millis();
 
-    // 1. Poll Supabase Cloud Commands over HTTPS (every 300ms)
-    if (WiFi.status() == WL_CONNECTED && (currentMs - lastSupabasePollMs >= SUPABASE_POLL_INTERVAL_MS)) {
-        lastSupabasePollMs = currentMs;
-        pollSupabaseCloud();
+    // 1. Poll Render Cloud Commands over HTTPS (every 200ms)
+    if (WiFi.status() == WL_CONNECTED && (currentMs - lastRenderPollMs >= RENDER_POLL_INTERVAL_MS)) {
+        lastRenderPollMs = currentMs;
+        pollRenderCloud();
     }
 
-    // 2. Process Real-Time USB Serial Commands (WASD / D-Pad)
+    // 2. Process Backup Real-Time USB Serial Commands (WASD / D-Pad)
     handleWebControlInput();
 
     // 3. 50Hz Non-blocking Encoder Feedback Polling
@@ -177,8 +177,39 @@ void loop() {
 }
 
 /**
+ * Polls Render Cloud HTTPS GET /api/cmd endpoint
+ */
+void pollRenderCloud() {
+    if (WiFi.status() != WL_CONNECTED) return;
+
+    if (sslClient.connect(RENDER_HOST, RENDER_PORT)) {
+        sslClient.print("GET /api/cmd HTTP/1.1\r\n");
+        sslClient.print("Host: "); sslClient.print(RENDER_HOST); sslClient.print("\r\n");
+        sslClient.print("Connection: close\r\n\r\n");
+
+        String response = "";
+        unsigned long timeout = millis();
+        while (sslClient.connected() && millis() - timeout < 800) {
+            while (sslClient.available()) {
+                char c = sslClient.read();
+                response += c;
+            }
+        }
+        sslClient.stop();
+
+        int cmdIndex = response.indexOf("\"cmd\":\"");
+        if (cmdIndex != -1) {
+            char cmdKey = toLowerCase(response.charAt(cmdIndex + 7));
+            if (cmdKey != lastExecutedCmd) {
+                lastExecutedCmd = cmdKey;
+                executeCommand(cmdKey, "Render Cloud");
+            }
+        }
+    }
+}
+
+/**
  * Central Command Executor
- * Sets continuous target velocity targetVx, targetVy
  */
 void executeCommand(char key, const char* source) {
     if (key == 'w') {
@@ -233,9 +264,9 @@ void executeCommand(char key, const char* source) {
  */
 void moveRobotVelocities(float vx, float vy) {
     float fl =  vy + vx;
-    float fr = -(vy - vx); // Right side motor mirrored 180°
+    float fr = -(vy - vx);
     float rl =  vy - vx;
-    float rr = -(vy + vx); // Right side motor mirrored 180°
+    float rr = -(vy + vx);
 
     Serial1.print("v 0 "); Serial1.println(fl, 2);
     Serial1.print("v 1 "); Serial1.println(fr, 2);
@@ -257,31 +288,31 @@ void stopAllMotors() {
 }
 
 void setupODriveFront() {
-    Serial1.println("c 0"); delay(100); // Clear Axis 0 errors
-    Serial1.println("w axis0.requested_state 1"); delay(100); // IDLE
-    Serial1.println("w axis0.controller.config.control_mode 2"); delay(100); // VELOCITY_CONTROL
-    Serial1.println("w axis0.controller.config.input_mode 1"); delay(100); // PASSTHROUGH
-    Serial1.println("w axis0.requested_state 8"); delay(100); // CLOSED_LOOP_CONTROL
+    Serial1.println("c 0"); delay(100);
+    Serial1.println("w axis0.requested_state 1"); delay(100);
+    Serial1.println("w axis0.controller.config.control_mode 2"); delay(100);
+    Serial1.println("w axis0.controller.config.input_mode 1"); delay(100);
+    Serial1.println("w axis0.requested_state 8"); delay(100);
 
-    Serial1.println("c 1"); delay(100); // Clear Axis 1 errors
-    Serial1.println("w axis1.requested_state 1"); delay(100); // IDLE
-    Serial1.println("w axis1.controller.config.control_mode 2"); delay(100); // VELOCITY_CONTROL
-    Serial1.println("w axis1.controller.config.input_mode 1"); delay(100); // PASSTHROUGH
-    Serial1.println("w axis1.requested_state 8"); delay(100); // CLOSED_LOOP_CONTROL
+    Serial1.println("c 1"); delay(100);
+    Serial1.println("w axis1.requested_state 1"); delay(100);
+    Serial1.println("w axis1.controller.config.control_mode 2"); delay(100);
+    Serial1.println("w axis1.controller.config.input_mode 1"); delay(100);
+    Serial1.println("w axis1.requested_state 8"); delay(100);
 }
 
 void setupODriveRear() {
-    odriveRear.println("c 0"); delay(100); // Clear Axis 0 errors
-    odriveRear.println("w axis0.requested_state 1"); delay(100); // IDLE
-    odriveRear.println("w axis0.controller.config.control_mode 2"); delay(100); // VELOCITY_CONTROL
-    odriveRear.println("w axis0.controller.config.input_mode 1"); delay(100); // PASSTHROUGH
-    odriveRear.println("w axis0.requested_state 8"); delay(100); // CLOSED_LOOP_CONTROL
+    odriveRear.println("c 0"); delay(100);
+    odriveRear.println("w axis0.requested_state 1"); delay(100);
+    odriveRear.println("w axis0.controller.config.control_mode 2"); delay(100);
+    odriveRear.println("w axis0.controller.config.input_mode 1"); delay(100);
+    odriveRear.println("w axis0.requested_state 8"); delay(100);
 
-    odriveRear.println("c 1"); delay(100); // Clear Axis 1 errors
-    odriveRear.println("w axis1.requested_state 1"); delay(100); // IDLE
-    odriveRear.println("w axis1.controller.config.control_mode 2"); delay(100); // VELOCITY_CONTROL
-    odriveRear.println("w axis1.controller.config.input_mode 1"); delay(100); // PASSTHROUGH
-    odriveRear.println("w axis1.requested_state 8"); delay(100); // CLOSED_LOOP_CONTROL
+    odriveRear.println("c 1"); delay(100);
+    odriveRear.println("w axis1.requested_state 1"); delay(100);
+    odriveRear.println("w axis1.controller.config.control_mode 2"); delay(100);
+    odriveRear.println("w axis1.controller.config.input_mode 1"); delay(100);
+    odriveRear.println("w axis1.requested_state 8"); delay(100);
 }
 
 void pollODrives() {
@@ -319,38 +350,6 @@ void connectToWiFi() {
     }
 }
 
-void pollSupabaseCloud() {
-    if (WiFi.status() != WL_CONNECTED) return;
-    if (String(SUPABASE_HOST).startsWith("your-project")) return;
-
-    if (sslClient.connect(SUPABASE_HOST, SUPABASE_PORT)) {
-        sslClient.print("GET /rest/v1/robot_command?id=eq.1&select=cmd HTTP/1.1\r\n");
-        sslClient.print("Host: "); sslClient.print(SUPABASE_HOST); sslClient.print("\r\n");
-        sslClient.print("apikey: "); sslClient.print(SUPABASE_ANON_KEY); sslClient.print("\r\n");
-        sslClient.print("Authorization: Bearer "); sslClient.print(SUPABASE_ANON_KEY); sslClient.print("\r\n");
-        sslClient.print("Connection: close\r\n\r\n");
-
-        String response = "";
-        unsigned long timeout = millis();
-        while (sslClient.connected() && millis() - timeout < 1000) {
-            while (sslClient.available()) {
-                char c = sslClient.read();
-                response += c;
-            }
-        }
-        sslClient.stop();
-
-        int cmdIndex = response.indexOf("\"cmd\":\"");
-        if (cmdIndex != -1) {
-            char cmdKey = toLowerCase(response.charAt(cmdIndex + 7));
-            if (cmdKey != lastExecutedCmd) {
-                lastExecutedCmd = cmdKey;
-                executeCommand(cmdKey, "Supabase Cloud");
-            }
-        }
-    }
-}
-
 void handleWebControlInput() {
     while (Serial.available() > 0) {
         char key = toLowerCase((char)Serial.read());
@@ -361,7 +360,7 @@ void handleWebControlInput() {
 void printStatusHeartbeat() {
     Serial.print("💬 [HEARTBEAT ");
     Serial.print(millis() / 1000);
-    Serial.print("s] Wi-Fi: ");
+    Serial.print("s] Render Cloud: ");
     Serial.print(WiFi.status() == WL_CONNECTED ? "CONNECTED" : "DISCONNECTED");
     Serial.print(" | Mode: ");
     Serial.print(isAutoRoamEnabled ? "AUTO" : "MANUAL");

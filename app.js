@@ -2,14 +2,13 @@
  * app.js
  * Omni-wheel Robot Controller Engine
  * 
- * Supports 3 Multi-Channel Direct Control Paths:
- *   1. Web Serial API (USB Direct Connection to Mac)
- *   2. Wi-Fi Direct HTTP API (Direct IP fetch to Arduino R4 WiFi)
- *   3. Supabase Realtime & Cloud MQTT
+ * Direct Render Cloud Connection (omni-wheel-control.onrender.com)
+ *   - Automatic Web Serial (USB)
+ *   - Automatic Render Cloud API (/api/cmd?set=w)
  */
 
 // ==========================================
-// 1. WEB SERIAL API CONTROLLER
+// 1. WEB SERIAL API CONTROLLER (USB DIRECT)
 // ==========================================
 class SerialController {
     constructor(onData, onStatus) {
@@ -131,51 +130,25 @@ class SerialController {
 
 
 // ==========================================
-// 2. SUPABASE REALTIME CONTROLLER
+// 2. RENDER CLOUD CONTROLLER
 // ==========================================
-class SupabaseController {
+class RenderCloudController {
     constructor(onStatusChange) {
         this.onStatusChange = onStatusChange;
-        this.supabase = null;
-        this.channel = null;
-        this.isConnected = false;
-        
-        this.supabaseUrl = 'https://your-project.supabase.co';
-        this.supabaseKey = 'YOUR_SUPABASE_ANON_KEY';
-
-        this.init();
-    }
-
-    init() {
-        if (typeof supabase === 'undefined' || this.supabaseUrl.includes('your-project')) {
-            return;
-        }
-
-        try {
-            this.supabase = supabase.createClient(this.supabaseUrl, this.supabaseKey);
-            this.channel = this.supabase.channel('robot_control');
-
-            this.channel.subscribe((status) => {
-                if (status === 'SUBSCRIBED') {
-                    console.log('✅ [Supabase Realtime] Connected!');
-                    this.isConnected = true;
-                    if (this.onStatusChange) this.onStatusChange(true, 'SUPABASE ACTIVE');
-                }
-            });
-        } catch (e) {
-            console.error('[Supabase Error]', e);
-        }
+        this.isConnected = true;
+        if (this.onStatusChange) this.onStatusChange(true, 'RENDER CLOUD ACTIVE');
     }
 
     send(cmd) {
-        if (this.supabase && this.isConnected && this.channel) {
-            this.channel.send({
-                type: 'broadcast',
-                event: 'cmd',
-                payload: { cmd: cmd }
+        // Send command to Render Cloud Server (/api/cmd?set=w)
+        fetch('/api/cmd?set=' + cmd)
+            .then(res => res.json())
+            .then(data => {
+                console.log(`⚡ [Render Cloud Sent] GET /api/cmd?set=${cmd}`);
+            })
+            .catch(err => {
+                console.warn('[Render Cloud Error]', err);
             });
-            console.log(`⚡ [Supabase Broadcast] Sent '${cmd}'`);
-        }
     }
 }
 
@@ -184,22 +157,13 @@ class SupabaseController {
 // 3. MULTI-CHANNEL CONTROL DISPATCHER
 // ==========================================
 class RobotControlDispatcher {
-    constructor(serialController, supabaseController, statusBadge, statusText) {
+    constructor(serialController, renderCloudController, statusBadge, statusText) {
         this.serialController = serialController;
-        this.supabaseController = supabaseController;
+        this.renderCloudController = renderCloudController;
         this.statusBadge = statusBadge;
         this.statusText = statusText;
         
-        this.targetIp = localStorage.getItem('arduino_wifi_ip') || '';
-    }
-
-    setTargetIp(ip) {
-        this.targetIp = ip.trim();
-        if (this.targetIp) {
-            localStorage.setItem('arduino_wifi_ip', this.targetIp);
-            console.log(`📶 [Wi-Fi Direct IP Configured] http://${this.targetIp}`);
-            this.updateStatus(true, `WI-FI IP: ${this.targetIp}`);
-        }
+        this.updateStatus(true, 'RENDER CLOUD ACTIVE');
     }
 
     updateStatus(isConnected, text) {
@@ -215,30 +179,14 @@ class RobotControlDispatcher {
     }
 
     send(cmd) {
-        let dispatched = false;
-
-        // Path 1: USB Web Serial
+        // 1. Send via USB Web Serial if connected
         if (this.serialController && this.serialController.port) {
             this.serialController.send(cmd);
-            dispatched = true;
         }
 
-        // Path 2: Wi-Fi Direct HTTP API (Fetch endpoint)
-        if (this.targetIp) {
-            const url = `http://${this.targetIp}/${cmd}`;
-            fetch(url, { mode: 'no-cors' }).catch(() => {});
-            console.log(`🌐 [Wi-Fi HTTP Direct] Sent GET /${cmd} -> ${url}`);
-            dispatched = true;
-        }
-
-        // Path 3: Supabase Cloud Realtime
-        if (this.supabaseController && this.supabaseController.isConnected) {
-            this.supabaseController.send(cmd);
-            dispatched = true;
-        }
-
-        if (!dispatched) {
-            console.log(`💡 [Control] Command '${cmd}' dispatched. Connect USB Serial or enter Wi-Fi IP to drive!`);
+        // 2. Send via Render Cloud Server (/api/cmd?set=w)
+        if (this.renderCloudController) {
+            this.renderCloudController.send(cmd);
         }
     }
 }
@@ -253,9 +201,6 @@ document.addEventListener('DOMContentLoaded', () => {
     const statusBadge = document.getElementById('status-badge');
     const statusText = document.getElementById('status-text');
 
-    const ipInput = document.getElementById('ip-address');
-    const btnIpSave = document.getElementById('btn-ip-save');
-
     const btnUp = document.getElementById('btn-up');
     const btnDown = document.getElementById('btn-down');
     const btnLeft = document.getElementById('btn-left');
@@ -266,31 +211,17 @@ document.addEventListener('DOMContentLoaded', () => {
 
     // Instantiate Controllers
     const serialController = new SerialController(
-        (encoders, hz) => {
-            // Encoder Telemetry Callback
-        },
+        (encoders, hz) => {},
         (isConnected, label) => {
             dispatcher.updateStatus(isConnected, label);
         }
     );
 
-    const supabaseController = new SupabaseController((isConnected, label) => {
+    const renderCloudController = new RenderCloudController((isConnected, label) => {
         dispatcher.updateStatus(isConnected, label);
     });
 
-    const dispatcher = new RobotControlDispatcher(serialController, supabaseController, statusBadge, statusText);
-
-    // Restore saved Wi-Fi IP if present
-    if (ipInput && dispatcher.targetIp) {
-        ipInput.value = dispatcher.targetIp;
-        dispatcher.updateStatus(true, `WI-FI IP: ${dispatcher.targetIp}`);
-    }
-
-    if (btnIpSave) {
-        btnIpSave.addEventListener('click', () => {
-            dispatcher.setTargetIp(ipInput.value);
-        });
-    }
+    const dispatcher = new RobotControlDispatcher(serialController, renderCloudController, statusBadge, statusText);
 
     // USB Serial Connect Button
     if (btnConnect) {
