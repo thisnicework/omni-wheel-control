@@ -2,13 +2,10 @@
  * arduino_odrive_relay.ino
  * 
  * Target MCU: Arduino Uno R4 WiFi
- * Purpose: Dual ODrive v3.6 Relay with Revived USB Serial Monitor & Web Control.
+ * Purpose: Dual ODrive v3.6 Relay with Auto-Roam Motion Engine.
  * 
- * USB Serial Control Feature:
- *   - Type 'w', 's', 'a', 'd' in Serial Monitor + Enter: Drives continuously until 'x' is typed!
- *   - Type 'x' in Serial Monitor + Enter: Instantly stops all motors.
- *   - Type '1'..'9' in Serial Monitor + Enter: Adjusts velocity speed level on the fly.
- *   - Type raw ODrive commands (e.g. 'v 0 8.0', 'r vbus_voltage'): Passthrough directly to ODrives.
+ * Compilation Fix:
+ *   - Restored full updateAutoRoamMotion() implementation to resolve linker 'undefined reference' error.
  *   - Supports Mac Local Relay Server (192.168.10.140:8000), Cloud MQTT, & USB Serial.
  */
 
@@ -201,6 +198,45 @@ void loop() {
     // 6. Asynchronously read incoming ODrive responses
     processSerial1();
     processSoftSerial();
+}
+
+/**
+ * Auto-Roam Autonomous Motion Engine
+ */
+void updateAutoRoamMotion() {
+    unsigned long now = millis();
+    unsigned long elapsed = now - stateStartTime;
+
+    if (elapsed > stateDuration) {
+        stateStartTime = now;
+
+        if (currentState == STATE_GENTLE_DASH) {
+            currentState = STATE_BRIEF_REST;
+            stateDuration = 800;
+            fixedVx = 0.0f;
+            fixedVy = 0.0f;
+        } else {
+            currentState = STATE_GENTLE_DASH;
+            stateDuration = random(1200, 2500);
+            
+            float angle = (random(0, 360) * DEG_TO_RAD);
+            float speed = 1.0f + (random(0, 10) / 10.0f);
+            
+            fixedVx = cos(angle) * speed;
+            fixedVy = sin(angle) * speed;
+        }
+    }
+
+    if (currentState == STATE_GENTLE_DASH) {
+        currentVx += (fixedVx - currentVx) * 0.25f;
+        currentVy += (fixedVy - currentVy) * 0.25f;
+    } else {
+        float breath = sin(now * 0.002f) * 0.10f;
+        currentVx += (breath - currentVx) * 0.25f;
+        currentVy += (breath - currentVy) * 0.25f;
+    }
+
+    moveRobotVelocities(currentVx, currentVy);
 }
 
 /**
