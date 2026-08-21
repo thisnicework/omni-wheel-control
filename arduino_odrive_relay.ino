@@ -2,11 +2,12 @@
  * arduino_odrive_relay.ino
  * 
  * Target MCU: Arduino Uno R4 WiFi
- * Purpose: Dual ODrive v3.6 Relay with Strict Numeric Echo Filtering.
+ * Purpose: Dual ODrive v3.6 Relay with Continuous Arming & Zero Transition Delay.
  * 
- * Fix for False State 0 Error Reporting:
- *   - Strict Numeric Filtering: Prevents corrupted UART echo lines (e.g. ' 1 -6.00') from triggering false State 0 error logs.
- *   - Guarantees true ODrive State 8 reporting over USB Serial.
+ * Fix for "Commands received fine but motor doesn't move":
+ *   - Continuous Closed-Loop State 8: ODrives remain in State 8 at velocity 0 (v 0 0) when stopped.
+ *   - Eliminates State 1 -> State 8 state machine transition delay on button press.
+ *   - Allows velocity commands (v 0 6.0) to take effect INSTANTLY on 'W', 'A', 'S', 'D' press.
  *   - Supports Mac Local Relay Server (192.168.10.140:8000), Cloud MQTT, & USB Serial.
  */
 
@@ -135,7 +136,7 @@ void setup() {
     delay(1000);
 
     Serial.println("\n==================================================");
-    Serial.println("  🤖 Arduino Uno R4 WiFi - Strict Response Engine ");
+    Serial.println("  🤖 Arduino Uno R4 WiFi - Zero Delay Drive Engine ");
     Serial.println("==================================================");
 
     // Initialize ODrives into Closed Loop Velocity Control once at boot
@@ -332,7 +333,7 @@ void rearmODrivesIfNeeded() {
 }
 
 /**
- * Central Command Executor - INSTANT DIRECT UART OUTPUT
+ * Central Command Executor - ZERO TRANSITION DELAY
  */
 void executeCommand(char key, const char* source) {
     if (key == 'w') {
@@ -343,6 +344,8 @@ void executeCommand(char key, const char* source) {
         targetVy = currentDriveSpeed;
         currentVx = targetVx;
         currentVy = targetVy;
+
+        // Send velocity commands directly over UART
         moveRobotVelocities(currentVx, currentVy);
 
         if (lastExecutedKey != 'w') {
@@ -359,6 +362,7 @@ void executeCommand(char key, const char* source) {
         targetVy = -currentDriveSpeed;
         currentVx = targetVx;
         currentVy = targetVy;
+
         moveRobotVelocities(currentVx, currentVy);
 
         if (lastExecutedKey != 's') {
@@ -375,6 +379,7 @@ void executeCommand(char key, const char* source) {
         targetVy = 0.0f;
         currentVx = targetVx;
         currentVy = targetVy;
+
         moveRobotVelocities(currentVx, currentVy);
 
         if (lastExecutedKey != 'a') {
@@ -391,6 +396,7 @@ void executeCommand(char key, const char* source) {
         targetVy = 0.0f;
         currentVx = targetVx;
         currentVy = targetVy;
+
         moveRobotVelocities(currentVx, currentVy);
 
         if (lastExecutedKey != 'd') {
@@ -440,14 +446,14 @@ void moveRobotVelocities(float vx, float vy) {
 }
 
 /**
- * Fast Non-Blocking Motor Stop
+ * Fast Non-Blocking Motor Stop - Keeps ODrive in State 8 at velocity 0
  */
 void stopAllMotors() {
     targetVx = 0.0f;
     targetVy = 0.0f;
     currentVx = 0.0f;
     currentVy = 0.0f;
-    isArmed = false;
+    // Keep isArmed = true so ODrive stays in State 8 ready for instant movement!
 
     Serial1.println("v 0 0");
     Serial1.println("v 1 0");
