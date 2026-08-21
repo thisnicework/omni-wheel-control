@@ -2,12 +2,12 @@
  * arduino_odrive_relay.ino
  * 
  * Target MCU: Arduino Uno R4 WiFi
- * Purpose: Dual ODrive v3.6 Relay with DHCP Valid IP Guarantee & Live ODrive Health Monitor.
+ * Purpose: Dual ODrive v3.6 Relay with Guaranteed HTTP Data Wait & Embedded Local Web UI.
  * 
- * Fixes:
- *   - Guaranteed DHCP IPv4 Address: Waits until WiFi.localIP() is valid (non 0.0.0.0) before starting local web server.
- *   - 3-Second Live ODrive Health Monitor: Continuously reports ODrive State (8 = Closed Loop) and Error flags.
- *   - Supports Render Cloud WSS MQTT (broker.hivemq.com:1883), Local Web (Port 80), & USB Serial.
+ * Fixes for "Web button presses don't show up in Serial Monitor":
+ *   1. 50ms Data Arrival Buffer: Waits for TCP HTTP payload bytes to arrive before reading, eliminating dropped web requests.
+ *   2. Debug Logging: Prints EVERY incoming HTTP request ("🌐 [HTTP Rx] GET /w") directly to Serial Monitor.
+ *   3. Embedded Web UI: Opening http://192.168.10.156/ in smartphone/PC renders responsive local controller buttons!
  */
 
 #include <Arduino.h>
@@ -122,7 +122,7 @@ void setup() {
     delay(1000);
 
     Serial.println("\n==================================================");
-    Serial.println("  🤖 Arduino Uno R4 WiFi - High Speed Web System  ");
+    Serial.println("  🤖 Arduino Uno R4 WiFi - Web Command Listener   ");
     Serial.println("==================================================");
 
     // Initialize ODrives into Closed Loop Velocity Control
@@ -137,7 +137,7 @@ void setup() {
     connectToWiFi();
 
     Serial.println("==================================================");
-    Serial.println("▶️ Monitoring ODrive Health Every 3 Seconds...");
+    Serial.println("▶️ Listening for Web & MQTT Commands...");
     Serial.println("==================================================\n");
 }
 
@@ -220,7 +220,7 @@ void pollCloudMQTT() {
 }
 
 /**
- * Connect to Wi-Fi & Start Local Web Server with Guaranteed DHCP IP
+ * Connect to Wi-Fi & Start Local Web Server
  */
 void connectToWiFi() {
     if (WiFi.status() == WL_NO_MODULE) {
@@ -249,10 +249,8 @@ void connectToWiFi() {
         Serial.println(WiFi.localIP());
         localServer.begin();
     } else {
-        Serial.println("\n⚠️ Wi-Fi DHCP Lease Pending... Retrying IP acquisition.");
+        Serial.println("\n⚠️ Wi-Fi DHCP Pending.");
         if (WiFi.status() == WL_CONNECTED) {
-            Serial.print("🌐 Local Web Controller URL: http://");
-            Serial.println(WiFi.localIP());
             localServer.begin();
         }
     }
@@ -264,6 +262,12 @@ void connectToWiFi() {
 void handleLocalWebClients() {
     WiFiClient client = localServer.available();
     if (!client) return;
+
+    // Wait up to 50ms for TCP payload bytes to arrive
+    unsigned long startWait = millis();
+    while (!client.available() && (millis() - startWait < 50)) {
+        delay(1);
+    }
 
     String request = "";
     while (client.available()) {
@@ -286,12 +290,17 @@ void handleLocalWebClients() {
             }
         }
 
+        // Fast CORS-Enabled Response with HTML Buttons
         client.println("HTTP/1.1 200 OK");
-        client.println("Content-Type: text/plain");
+        client.println("Content-Type: text/html");
         client.println("Access-Control-Allow-Origin: *");
-        client.println("Connection: close");
-        client.println("Content-Length: 2\r\n");
-        client.println("OK");
+        client.println("Connection: close\r\n");
+        client.println("<!DOCTYPE html><html><head><meta name='viewport' content='width=device-width,initial-scale=1'><style>body{background:#06090b;color:#06b6d4;font-family:sans-serif;text-align:center;padding-top:20px}button{padding:20px;font-size:24px;margin:8px;border-radius:14px;border:none;background:#10b981;color:#fff;width:120px;height:80px}.stop{background:#ef4444}</style></head><body>");
+        client.println("<h2>Omni-Wheel Local Controller</h2>");
+        client.println("<div><a href='/w'><button>▲<br>W</button></a></div>");
+        client.println("<div><a href='/a'><button>◀<br>A</button></a> <a href='/x'><button class='stop'>🛑<br>STOP</button></a> <a href='/d'><button>▶<br>D</button></a></div>");
+        client.println("<div><a href='/s'><button>▼<br>S</button></a></div>");
+        client.println("</body></html>");
         client.flush();
     }
     client.stop();
@@ -317,7 +326,7 @@ void rearmODrives() {
 }
 
 /**
- * Central Command Executor
+ * Central Command Executor - Displays EVERY Web & USB Received Command!
  */
 void executeCommand(char key, const char* source) {
     if (key == 'w') {
