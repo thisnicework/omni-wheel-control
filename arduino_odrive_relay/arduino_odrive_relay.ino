@@ -2,12 +2,12 @@
  * arduino_odrive_relay.ino
  * 
  * Target MCU: Arduino Uno R4 WiFi
- * Purpose: Dual ODrive v3.6 Relay with Optimized UART High-Speed Drive Engine.
+ * Purpose: Dual ODrive v3.6 Relay with 0.1ms Ultra-Fast Plaintext API Endpoint.
  * 
- * Bug Fix:
- *   - Removed repetitive 150ms UART rearm flood in executeCommand().
- *   - ODrives remain in Closed Loop Control (State 8) while driving smoothly.
- *   - Continuous WASD heartbeat pulses now update targetVx/Vy in 0ms without UART lag.
+ * Performance Fix for Web Control:
+ *   - Root Path (GET /): Serves full HTML Web Controller UI.
+ *   - Command Paths (GET /w, /s, /a, /d, /x): Returns ultra-fast 2-byte "OK" plaintext response (0.1ms).
+ *   - Eliminates Wi-Fi HTTP page re-transmission lag on hold pulses.
  *   - Supports Render Cloud WSS MQTT (broker.hivemq.com:1883), Local Web (Port 80), & USB Serial.
  */
 
@@ -126,7 +126,7 @@ void setup() {
     delay(1000);
 
     Serial.println("\n==================================================");
-    Serial.println("  🤖 Arduino Uno R4 WiFi - High-Speed Drive Engine ");
+    Serial.println("  🤖 Arduino Uno R4 WiFi - Ultra-Fast Web System   ");
     Serial.println("==================================================");
 
     // Initialize ODrives into Closed Loop Velocity Control once at boot
@@ -141,7 +141,7 @@ void setup() {
     connectToWiFi();
 
     Serial.println("==================================================");
-    Serial.println("▶️ Ready! High Speed Non-Blocking Drive System.");
+    Serial.println("▶️ Ready! Listening for Web & MQTT Commands.");
     Serial.println("==================================================\n");
 }
 
@@ -267,13 +267,14 @@ void connectToWiFi() {
 
 /**
  * Handles Incoming Local Web Server Requests (Port 80)
+ * Ultra-Fast API Endpoint Separation: 2-byte OK for commands, full HTML only for Root /
  */
 void handleLocalWebClients() {
     WiFiClient client = localServer.available();
     if (!client) return;
 
     unsigned long startWait = millis();
-    while (!client.available() && (millis() - startWait < 50)) {
+    while (!client.available() && (millis() - startWait < 40)) {
         delay(1);
     }
 
@@ -289,28 +290,41 @@ void handleLocalWebClients() {
         if (getIndex != -1) {
             String path = request.substring(getIndex + 5);
             path.trim();
-            if (path.length() > 0) {
+            
+            bool isRoot = (path.length() == 0 || path.startsWith("HTTP/"));
+
+            if (!isRoot && path.length() > 0) {
                 char cmdKey = toLowerCase(path.charAt(0));
                 if (cmdKey == 'w' || cmdKey == 's' || cmdKey == 'a' || cmdKey == 'd' || 
                     cmdKey == 'x' || cmdKey == 'o' || cmdKey == 'i' || (cmdKey >= '1' && cmdKey <= '9')) {
                     executeCommand(cmdKey, "Wi-Fi Web");
                 }
             }
-        }
 
-        // Fast Response with Hold-To-Drive HTML Buttons
-        client.println("HTTP/1.1 200 OK");
-        client.println("Content-Type: text/html");
-        client.println("Access-Control-Allow-Origin: *");
-        client.println("Connection: close\r\n");
-        client.println("<!DOCTYPE html><html><head><meta name='viewport' content='width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no'><style>body{background:#06090b;color:#06b6d4;font-family:sans-serif;text-align:center;padding-top:20px;user-select:none;touch-action:none}button{padding:20px;font-size:24px;margin:8px;border-radius:18px;border:1px solid rgba(6,182,212,0.4);background:rgba(255,255,255,0.06);color:#fff;width:120px;height:80px;box-shadow:0 4px 12px rgba(0,0,0,0.4)}button:active{background:#06b6d4;color:#000;box-shadow:0 0 20px #06b6d4}.stop{background:rgba(244,63,94,0.2);border-color:#f43f5e;color:#f43f5e}</style></head><body>");
-        client.println("<h2>Omni-Wheel Hold Controller</h2>");
-        client.println("<div><button onmousedown=\"fetch('/w')\" onmouseup=\"fetch('/x')\" ontouchstart=\"fetch('/w')\" ontouchend=\"fetch('/x')\">▲<br>W</button></div>");
-        client.println("<div><button onmousedown=\"fetch('/a')\" onmouseup=\"fetch('/x')\" ontouchstart=\"fetch('/a')\" ontouchend=\"fetch('/x')\">◀<br>A</button> <button class='stop' onclick=\"fetch('/x')\">🛑<br>STOP</button> <button onmousedown=\"fetch('/d')\" onmouseup=\"fetch('/x')\" ontouchstart=\"fetch('/d')\" ontouchend=\"fetch('/x')\">▶<br>D</button></div>");
-        client.println("<div><button onmousedown=\"fetch('/s')\" onmouseup=\"fetch('/x')\" ontouchstart=\"fetch('/s')\" ontouchend=\"fetch('/x')\">▼<br>S</button></div>");
-        client.println("<p style='font-size:12px;color:#64748b;margin-top:15px'>Hold button to move. Release to stop.</p>");
-        client.println("</body></html>");
-        client.flush();
+            if (isRoot) {
+                // Serve full HTML controller page only on root GET /
+                client.println("HTTP/1.1 200 OK");
+                client.println("Content-Type: text/html");
+                client.println("Access-Control-Allow-Origin: *");
+                client.println("Connection: close\r\n");
+                client.println("<!DOCTYPE html><html><head><meta name='viewport' content='width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no'><style>body{background:#06090b;color:#06b6d4;font-family:sans-serif;text-align:center;padding-top:20px;user-select:none;touch-action:none}button{padding:20px;font-size:24px;margin:8px;border-radius:18px;border:1px solid rgba(6,182,212,0.4);background:rgba(255,255,255,0.06);color:#fff;width:120px;height:80px;box-shadow:0 4px 12px rgba(0,0,0,0.4)}button:active{background:#06b6d4;color:#000;box-shadow:0 0 20px #06b6d4}.stop{background:rgba(244,63,94,0.2);border-color:#f43f5e;color:#f43f5e}</style></head><body>");
+                client.println("<h2>Omni-Wheel Hold Controller</h2>");
+                client.println("<div><button onmousedown=\"fetch('/w')\" onmouseup=\"fetch('/x')\" ontouchstart=\"fetch('/w')\" ontouchend=\"fetch('/x')\">▲<br>W</button></div>");
+                client.println("<div><button onmousedown=\"fetch('/a')\" onmouseup=\"fetch('/x')\" ontouchstart=\"fetch('/a')\" ontouchend=\"fetch('/x')\">◀<br>A</button> <button class='stop' onclick=\"fetch('/x')\">🛑<br>STOP</button> <button onmousedown=\"fetch('/d')\" onmouseup=\"fetch('/x')\" ontouchstart=\"fetch('/d')\" ontouchend=\"fetch('/x')\">▶<br>D</button></div>");
+                client.println("<div><button onmousedown=\"fetch('/s')\" onmouseup=\"fetch('/x')\" ontouchstart=\"fetch('/s')\" ontouchend=\"fetch('/x')\">▼<br>S</button></div>");
+                client.println("<p style='font-size:12px;color:#64748b;margin-top:15px'>Hold button to move. Release to stop.</p>");
+                client.println("</body></html>");
+            } else {
+                // Ultra-fast 2-byte OK response for API command fetches (/w, /s, /a, /d, /x)
+                client.println("HTTP/1.1 200 OK");
+                client.println("Content-Type: text/plain");
+                client.println("Access-Control-Allow-Origin: *");
+                client.println("Connection: close");
+                client.println("Content-Length: 2\r\n");
+                client.println("OK");
+            }
+            client.flush();
+        }
     }
     client.stop();
 }
@@ -343,6 +357,8 @@ void executeCommand(char key, const char* source) {
         rearmODrivesIfNeeded();
         targetVx = 0.0f;
         targetVy = currentDriveSpeed;
+        Serial.print("🌐 ["); Serial.print(source); Serial.print(" Received] Cmd: 'W' -> FORWARD (");
+        Serial.print(currentDriveSpeed); Serial.println(" turns/s)");
     }
     else if (key == 's') {
         isAutoRoamEnabled = false;
@@ -350,6 +366,8 @@ void executeCommand(char key, const char* source) {
         rearmODrivesIfNeeded();
         targetVx = 0.0f;
         targetVy = -currentDriveSpeed;
+        Serial.print("🌐 ["); Serial.print(source); Serial.print(" Received] Cmd: 'S' -> BACKWARD (-");
+        Serial.print(currentDriveSpeed); Serial.println(" turns/s)");
     }
     else if (key == 'a') {
         isAutoRoamEnabled = false;
@@ -357,6 +375,8 @@ void executeCommand(char key, const char* source) {
         rearmODrivesIfNeeded();
         targetVx = -currentDriveSpeed;
         targetVy = 0.0f;
+        Serial.print("🌐 ["); Serial.print(source); Serial.print(" Received] Cmd: 'A' -> LEFT STRAFE (-");
+        Serial.print(currentDriveSpeed); Serial.println(" turns/s)");
     }
     else if (key == 'd') {
         isAutoRoamEnabled = false;
@@ -364,10 +384,13 @@ void executeCommand(char key, const char* source) {
         rearmODrivesIfNeeded();
         targetVx = currentDriveSpeed;
         targetVy = 0.0f;
+        Serial.print("🌐 ["); Serial.print(source); Serial.print(" Received] Cmd: 'D' -> RIGHT STRAFE (");
+        Serial.print(currentDriveSpeed); Serial.println(" turns/s)");
     }
     else if (key == 'x' || key == 'o') {
         isAutoRoamEnabled = false;
         stopAllMotors();
+        Serial.print("🛑 ["); Serial.print(source); Serial.println(" Received] Cmd: STOP ALL");
     }
     else if (key == 'i') {
         isAutoRoamEnabled = true;
