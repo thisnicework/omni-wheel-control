@@ -2,11 +2,14 @@
  * arduino_odrive_relay.ino
  * 
  * Target MCU: Arduino Uno R4 WiFi
- * Purpose: Dual ODrive v3.6 Omniwheel Relay with Proven Hardware Kinematics & Delays.
+ * Purpose: Dual ODrive v3.6 Relay with Dual SoftwareSerial (No HardwareSerial TX1).
  * 
- * Hardware Wiring & Timing Configuration (Matches User Working Reference):
- *   - Rear ODrive SoftwareSerial: Pins 12 (RX), 11 (TX)
- *   - Front ODrive HardwareSerial: Serial1 (Pins 0 RX, 1 TX)
+ * Hardware Pin Allocation:
+ *   - Front ODrive SoftwareSerial (odriveFront): Pins 10 (RX), 9 (TX)
+ *   - Rear ODrive SoftwareSerial  (odriveRear) : Pins 12 (RX), 11 (TX)
+ *   - USB Serial Monitor                        : Serial (USB 115200 baud)
+ * 
+ * Performance & Timing:
  *   - ODrive Setup Delays: 200ms between ASCII initialization commands.
  *   - ODrive Velocity Delays: 10ms between individual wheel 'v' commands.
  *   - Kinematics:
@@ -46,6 +49,9 @@ WiFiClient wifiClient;
 WiFiClient macClient;
 MqttClient mqttClient(wifiClient);
 
+// Front ODrive SoftwareSerial on Pins 10 (RX), 9 (TX)
+SoftwareSerial odriveFront(10, 9);
+
 // Rear ODrive SoftwareSerial on Pins 12 (RX), 11 (TX)
 SoftwareSerial odriveRear(12, 11);
 
@@ -72,7 +78,6 @@ char lastExecutedKey = ' ';
 void connectToWiFi();
 void pollMacServer();
 void pollCloudMQTT();
-void setupSerial1();
 void setupSoftwareSerial(SoftwareSerial &odrive);
 void handleWebControlInput();
 void executeCommand(char key, const char* source);
@@ -83,16 +88,18 @@ void setup() {
     Serial.begin(MAC_BAUDRATE);
     delay(500);
 
-    Serial1.begin(ODRIVE_BAUDRATE);
+    odriveFront.begin(ODRIVE_BAUDRATE);
     odriveRear.begin(ODRIVE_BAUDRATE);
     delay(2000);
 
     Serial.println("\n==================================================");
-    Serial.println("  🤖 Omni-Wheel Proven Hardware Relay Controller   ");
+    Serial.println("  🤖 Omni-Wheel Dual SoftwareSerial Relay Controller ");
     Serial.println("==================================================");
 
-    Serial.println("⚙️ Initializing Front & Rear ODrives...");
-    setupSerial1();
+    Serial.println("⚙️ Initializing Front ODrive (Pins 10 RX, 9 TX)...");
+    setupSoftwareSerial(odriveFront);
+
+    Serial.println("⚙️ Initializing Rear ODrive (Pins 12 RX, 11 TX)...");
     setupSoftwareSerial(odriveRear);
 
     stopAllMotors(); // Safety stop
@@ -145,9 +152,9 @@ void handleWebControlInput() {
                 executeCommand(key, "USB Serial");
             }
         } else if (line.length() > 1) {
-            Serial.print("🔧 [ODrive Direct Passthrough] -> ");
+            Serial.print("🔧 [Dual ODrive Passthrough] -> ");
             Serial.println(line);
-            Serial1.println(line);
+            odriveFront.println(line);
             odriveRear.println(line);
         }
     }
@@ -319,16 +326,16 @@ void executeCommand(char key, const char* source) {
 }
 
 /**
- * Proven Omniwheel Drive Kinematics with 10ms Inter-Command Delays
+ * Dual SoftwareSerial Omniwheel Drive Kinematics with 10ms Delays
  */
 void moveRobot(int fl, int fr, int rl, int rr) {
-    // Front Wheels (Serial1)
-    Serial1.print("v 0 "); Serial1.println(fl); // 2사분면 (FL)
+    // Front Wheels (odriveFront: Pins 10 RX, 9 TX)
+    odriveFront.print("v 0 "); odriveFront.println(fl); // 2사분면 (FL)
     delay(10);
-    Serial1.print("v 1 "); Serial1.println(fr); // 1사분면 (FR)
+    odriveFront.print("v 1 "); odriveFront.println(fr); // 1사분면 (FR)
     delay(10);
 
-    // Rear Wheels (odriveRear)
+    // Rear Wheels (odriveRear: Pins 12 RX, 11 TX)
     odriveRear.print("v 1 "); odriveRear.println(rl); // 3사분면 (RL)
     delay(10);
     odriveRear.print("v 0 "); odriveRear.println(rr); // 4사분면 (RR)
@@ -336,34 +343,17 @@ void moveRobot(int fl, int fr, int rl, int rr) {
 }
 
 /**
- * Proven Safe Motor Stop Function
+ * Safe Motor Stop Function over Dual SoftwareSerial
  */
 void stopAllMotors() {
-    Serial1.println("v 0 0"); delay(10);
-    Serial1.println("v 1 0"); delay(10);
+    odriveFront.println("v 0 0"); delay(10);
+    odriveFront.println("v 1 0"); delay(10);
     odriveRear.println("v 0 0"); delay(10);
     odriveRear.println("v 1 0"); delay(10);
 }
 
 /**
- * Proven Front ODrive Setup with 200ms Delays
- */
-void setupSerial1() {
-    Serial1.println("c 0"); delay(200);
-    Serial1.println("w axis0.requested_state 1"); delay(200);
-    Serial1.println("w axis0.controller.config.control_mode 2"); delay(200);
-    Serial1.println("w axis0.controller.config.input_mode 1"); delay(200);
-    Serial1.println("w axis0.requested_state 8"); delay(200);
-
-    Serial1.println("c 1"); delay(200);
-    Serial1.println("w axis1.requested_state 1"); delay(200);
-    Serial1.println("w axis1.controller.config.control_mode 2"); delay(200);
-    Serial1.println("w axis1.controller.config.input_mode 1"); delay(200);
-    Serial1.println("w axis1.requested_state 8"); delay(200);
-}
-
-/**
- * Proven Rear ODrive Setup with 200ms Delays
+ * Universal ODrive Setup Function with 200ms Delays
  */
 void setupSoftwareSerial(SoftwareSerial &odrive) {
     odrive.println("c 0"); delay(200);
