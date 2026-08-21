@@ -2,11 +2,12 @@
  * arduino_odrive_relay.ino
  * 
  * Target MCU: Arduino Uno R4 WiFi
- * Purpose: Dual ODrive v3.6 Relay with Clean Web Command Logging on USB Serial Monitor.
+ * Purpose: Dual ODrive v3.6 Relay with Live ODrive Response Relay & Diagnostic Passthrough.
  * 
- * Serial Output:
- *   - Only displays incoming Web and USB control commands!
- *   - Disabled telemetry CSV line flooding and background heartbeats for 100% clean terminal output.
+ * Diagnostic Features:
+ *   - Relays commands 'w','s','a','d','x','i' to ODrives and checks ODrive state.
+ *   - Allows raw ODrive commands (e.g. "r axis0.error", "v 0 3.0") sent via USB/Web to be passed directly to ODrives.
+ *   - Prints ODrive responses ("axis0.error = 0x0", etc.) back to USB Serial for 100% transparent debugging.
  */
 
 #include <Arduino.h>
@@ -39,7 +40,7 @@ float encoderPositions[4] = {0.0f, 0.0f, 0.0f, 0.0f};
 
 // System Motion State
 bool isAutoRoamEnabled = false;
-float currentDriveSpeed = 2.0f; // Velocity turns/sec
+float currentDriveSpeed = 4.0f; // Velocity turns/sec (Default 4.0 rps = 240 RPM)
 
 // Continuous Target & Current Velocities (Vx, Vy)
 float targetVx = 0.0f;
@@ -84,6 +85,7 @@ void parseFrontLine(const char* line);
 void parseRearLine(const char* line);
 void handleWebControlInput();
 void executeCommand(char key, const char* source);
+void sendRawODriveCommand(const char* cmd);
 void updateAutoRoamMotion();
 void moveRobotVelocities(float vx, float vy);
 void stopAllMotors();
@@ -97,7 +99,7 @@ void setup() {
     delay(1000);
 
     Serial.println("\n==================================================");
-    Serial.println("  🌐 Arduino Uno R4 WiFi - Web Remote Controller  ");
+    Serial.println("  🤖 Arduino Uno R4 WiFi - Dual ODrive Relay System");
     Serial.println("==================================================");
 
     // Initialize ODrives into Closed Loop Velocity Control
@@ -112,7 +114,7 @@ void setup() {
     connectToWiFi();
 
     Serial.println("==================================================");
-    Serial.println("▶️ Listening for Web Commands... (Clean Output Mode)");
+    Serial.println("▶️ System Ready! Controlling ODrives via Web & USB.");
     Serial.println("==================================================\n");
 }
 
@@ -120,12 +122,12 @@ void loop() {
     unsigned long currentMicros = micros();
     unsigned long currentMs = millis();
 
-    // 1. Zero-Delay Local Web Requests (Port 80)
+    // 1. Local Web Server Requests (Port 80)
     if (WiFi.status() == WL_CONNECTED) {
         handleLocalWebClients();
     }
 
-    // 2. Real-Time USB Serial Backup Commands
+    // 2. USB Serial Commands & Raw ODrive Passthrough
     handleWebControlInput();
 
     // 3. 20Hz Encoder Feedback Polling
@@ -141,8 +143,8 @@ void loop() {
             updateAutoRoamMotion();
         } else {
             // Smoothly ramp currentVx, currentVy towards targetVx, targetVy
-            currentVx += (targetVx - currentVx) * 0.35f;
-            currentVy += (targetVy - currentVy) * 0.35f;
+            currentVx += (targetVx - currentVx) * 0.40f;
+            currentVy += (targetVy - currentVy) * 0.40f;
             moveRobotVelocities(currentVx, currentVy);
         }
     }
@@ -187,7 +189,7 @@ void connectToWiFi() {
 }
 
 /**
- * Fast 0ms Non-Blocking Socket Handling
+ * Handles Incoming Local Web Server Requests (Port 80)
  */
 void handleLocalWebClients() {
     WiFiClient client = localServer.available();
@@ -210,7 +212,6 @@ void handleLocalWebClients() {
             }
         }
 
-        // Send Fast HTTP Response
         client.println("HTTP/1.1 200 OK");
         client.println("Content-Type: text/plain");
         client.println("Access-Control-Allow-Origin: *");
@@ -226,17 +227,25 @@ void handleLocalWebClients() {
  * Re-arms ODrive motors: clears errors and enforces Closed Loop Mode 8
  */
 void rearmODrives() {
+    // Front ODrive (Serial1)
+    Serial1.println("w axis0.error 0");
+    Serial1.println("w axis1.error 0");
     Serial1.println("c 0");
+    Serial1.println("c 1");
     Serial1.println("w axis0.requested_state 8");
     Serial1.println("w axis1.requested_state 8");
 
+    // Rear ODrive (SoftwareSerial)
+    odriveRear.println("w axis0.error 0");
+    odriveRear.println("w axis1.error 0");
     odriveRear.println("c 0");
+    odriveRear.println("c 1");
     odriveRear.println("w axis0.requested_state 8");
     odriveRear.println("w axis1.requested_state 8");
 }
 
 /**
- * Central Command Executor - Displays ONLY Web & USB Received Commands!
+ * Central Command Executor
  */
 void executeCommand(char key, const char* source) {
     if (key == 'w') {
@@ -285,9 +294,9 @@ void executeCommand(char key, const char* source) {
         Serial.print("🤖 ["); Serial.print(source); Serial.println(" Received] Cmd: AUTO ROAM [I]");
     }
     else if (key >= '1' && key <= '9') {
-        currentDriveSpeed = 1.0f + (key - '1') * 0.45f;
+        currentDriveSpeed = 1.0f + (key - '1') * 1.5f;
         Serial.print("⚙️ ["); Serial.print(source); Serial.print(" Received] Speed Set To: ");
-        Serial.println(currentDriveSpeed);
+        Serial.print(currentDriveSpeed); Serial.println(" turns/s");
     }
 }
 
@@ -320,31 +329,35 @@ void stopAllMotors() {
 }
 
 void setupODriveFront() {
-    Serial1.println("c 0"); delay(100);
-    Serial1.println("w axis0.requested_state 1"); delay(100);
-    Serial1.println("w axis0.controller.config.control_mode 2"); delay(100);
-    Serial1.println("w axis0.controller.config.input_mode 1"); delay(100);
-    Serial1.println("w axis0.requested_state 8"); delay(100);
+    Serial1.println("w axis0.error 0"); delay(50);
+    Serial1.println("w axis1.error 0"); delay(50);
+    Serial1.println("c 0"); delay(50);
+    Serial1.println("c 1"); delay(50);
+    Serial1.println("w axis0.requested_state 1"); delay(50);
+    Serial1.println("w axis0.controller.config.control_mode 2"); delay(50);
+    Serial1.println("w axis0.controller.config.input_mode 1"); delay(50);
+    Serial1.println("w axis0.requested_state 8"); delay(50);
 
-    Serial1.println("c 1"); delay(100);
-    Serial1.println("w axis1.requested_state 1"); delay(100);
-    Serial1.println("w axis1.controller.config.control_mode 2"); delay(100);
-    Serial1.println("w axis1.controller.config.input_mode 1"); delay(100);
-    Serial1.println("w axis1.requested_state 8"); delay(100);
+    Serial1.println("w axis1.requested_state 1"); delay(50);
+    Serial1.println("w axis1.controller.config.control_mode 2"); delay(50);
+    Serial1.println("w axis1.controller.config.input_mode 1"); delay(50);
+    Serial1.println("w axis1.requested_state 8"); delay(50);
 }
 
 void setupODriveRear() {
-    odriveRear.println("c 0"); delay(100);
-    odriveRear.println("w axis0.requested_state 1"); delay(100);
-    odriveRear.println("w axis0.controller.config.control_mode 2"); delay(100);
-    odriveRear.println("w axis0.controller.config.input_mode 1"); delay(100);
-    odriveRear.println("w axis0.requested_state 8"); delay(100);
+    odriveRear.println("w axis0.error 0"); delay(50);
+    odriveRear.println("w axis1.error 0"); delay(50);
+    odriveRear.println("c 0"); delay(50);
+    odriveRear.println("c 1"); delay(50);
+    odriveRear.println("w axis0.requested_state 1"); delay(50);
+    odriveRear.println("w axis0.controller.config.control_mode 2"); delay(50);
+    odriveRear.println("w axis0.controller.config.input_mode 1"); delay(50);
+    odriveRear.println("w axis0.requested_state 8"); delay(50);
 
-    odriveRear.println("c 1"); delay(100);
-    odriveRear.println("w axis1.requested_state 1"); delay(100);
-    odriveRear.println("w axis1.controller.config.control_mode 2"); delay(100);
-    odriveRear.println("w axis1.controller.config.input_mode 1"); delay(100);
-    odriveRear.println("w axis1.requested_state 8"); delay(100);
+    odriveRear.println("w axis1.requested_state 1"); delay(50);
+    odriveRear.println("w axis1.controller.config.control_mode 2"); delay(50);
+    odriveRear.println("w axis1.controller.config.input_mode 1"); delay(50);
+    odriveRear.println("w axis1.requested_state 8"); delay(50);
 }
 
 void pollODrives() {
@@ -356,9 +369,19 @@ void pollODrives() {
 }
 
 void handleWebControlInput() {
-    while (Serial.available() > 0) {
-        char key = toLowerCase((char)Serial.read());
-        executeCommand(key, "USB Serial");
+    if (Serial.available() > 0) {
+        String line = Serial.readStringUntil('\n');
+        line.trim();
+        if (line.length() == 1) {
+            char key = toLowerCase(line.charAt(0));
+            executeCommand(key, "USB Serial");
+        } else if (line.length() > 1) {
+            // Passthrough raw ODrive command
+            Serial.print("🔧 [ODrive Passthrough] -> ");
+            Serial.println(line);
+            Serial1.println(line);
+            odriveRear.println(line);
+        }
     }
 }
 
@@ -442,6 +465,9 @@ void parseFrontLine(const char* line) {
     if (sscanf(line, "%f %f", &pos, &vel) >= 1) {
         encoderPositions[axisQueryFront] = pos;
         axisQueryFront = (axisQueryFront + 1) % 2;
+    } else {
+        Serial.print("💬 [ODrive Front Response] ");
+        Serial.println(line);
     }
 }
 
@@ -455,5 +481,8 @@ void parseRearLine(const char* line) {
             encoderPositions[3] = pos;
         }
         axisQueryRear = (axisQueryRear + 1) % 2;
+    } else {
+        Serial.print("💬 [ODrive Rear Response] ");
+        Serial.println(line);
     }
 }
