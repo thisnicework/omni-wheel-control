@@ -2,11 +2,12 @@
  * arduino_odrive_relay.ino
  * 
  * Target MCU: Arduino Uno R4 WiFi
- * Purpose: Dual ODrive v3.6 Relay with Instant Zero-Latency Direct UART Output.
+ * Purpose: Dual ODrive v3.6 Relay with 40A Maximum Beast Torque & 50 RPS Velocity Limits.
  * 
- * Fix for "Prints in Serial Monitor but ODrive doesn't move":
- *   - Instant Direct Execution: Sends velocity commands ('v 0 6.0', 'v 1 -6.0') IMMEDIATELY inside executeCommand().
- *   - Eliminates 50ms loop delay and prevents 'x' stop command from overwriting target velocities before transmission.
+ * Maximum Torque Safeguards:
+ *   - Enforces 40.0A Maximum Current Limit (current_lim = 40.0A) across all 4 motor axes.
+ *   - Expands Velocity Limit to 50.0 RPS (vel_limit = 50.0) so torque headroom is 100% unrestricted.
+ *   - Speed Levels 1..9 scale up to 28.0 RPS (1680 RPM) for extreme pushing power.
  *   - Supports Mac Local Relay Server (192.168.10.140:8000), Cloud MQTT, & USB Serial.
  */
 
@@ -61,7 +62,7 @@ unsigned long lastMoveCommandMs = 0;
 // System Motion State
 bool isAutoRoamEnabled = false;
 bool isArmed = false;
-float currentDriveSpeed = 6.0f; // Velocity turns/sec (Default 6.0 rps = 360 RPM for high torque)
+float currentDriveSpeed = 10.0f; // Velocity turns/sec (Default 10.0 rps = 600 RPM for maximum torque)
 
 // Continuous Target & Current Velocities (Vx, Vy)
 float targetVx = 0.0f;
@@ -134,7 +135,7 @@ void setup() {
     delay(1000);
 
     Serial.println("\n==================================================");
-    Serial.println("  🤖 Arduino Uno R4 WiFi - Instant Direct Drive   ");
+    Serial.println("  🤖 Arduino Uno R4 WiFi - 40A BEAST TORQUE DRIVE ");
     Serial.println("==================================================");
 
     // Initialize ODrives into Closed Loop Velocity Control once at boot
@@ -313,17 +314,21 @@ void queryODriveStatus() {
 }
 
 /**
- * Re-arms ODrive motors ONLY if transitioning from stopped state
+ * Re-arms ODrive motors with 40A Current Limit & State 8 Enforced
  */
 void rearmODrivesIfNeeded() {
     if (!isArmed) {
         Serial1.println("w axis0.error 0");
         Serial1.println("w axis1.error 0");
+        Serial1.println("w axis0.motor.config.current_lim 40.0");
+        Serial1.println("w axis1.motor.config.current_lim 40.0");
         Serial1.println("w axis0.requested_state 8");
         Serial1.println("w axis1.requested_state 8");
 
         odriveRear.println("w axis0.error 0");
         odriveRear.println("w axis1.error 0");
+        odriveRear.println("w axis0.motor.config.current_lim 40.0");
+        odriveRear.println("w axis1.motor.config.current_lim 40.0");
         odriveRear.println("w axis0.requested_state 8");
         odriveRear.println("w axis1.requested_state 8");
         isArmed = true;
@@ -416,7 +421,7 @@ void executeCommand(char key, const char* source) {
         Serial.print("🤖 ["); Serial.print(source); Serial.println(" Received] Cmd: AUTO ROAM [I]");
     }
     else if (key >= '1' && key <= '9') {
-        currentDriveSpeed = 2.0f + (key - '1') * 2.0f;
+        currentDriveSpeed = 4.0f + (key - '1') * 3.0f; // Scale 4.0 ~ 28.0 RPS!
         Serial.print("⚙️ ["); Serial.print(source); Serial.print(" Received] Speed Set To: ");
         Serial.print(currentDriveSpeed); Serial.println(" turns/s");
     }
@@ -455,45 +460,49 @@ void stopAllMotors() {
 }
 
 void setupODriveFront() {
-    Serial1.println("w axis0.error 0"); delay(30);
-    Serial1.println("w axis1.error 0"); delay(30);
-    Serial1.println("c 0"); delay(30);
-    Serial1.println("c 1"); delay(30);
+    Serial1.println("w axis0.error 0"); delay(20);
+    Serial1.println("w axis1.error 0"); delay(20);
+    Serial1.println("c 0"); delay(20);
+    Serial1.println("c 1"); delay(20);
 
-    // Boost motor current limits to 25A for maximum torque!
-    Serial1.println("w axis0.motor.config.current_lim 25.0"); delay(30);
-    Serial1.println("w axis1.motor.config.current_lim 25.0"); delay(30);
+    // Boost motor current limit to 40A and velocity limit to 50 RPS for MAXIMUM TORQUE!
+    Serial1.println("w axis0.motor.config.current_lim 40.0"); delay(20);
+    Serial1.println("w axis1.motor.config.current_lim 40.0"); delay(20);
+    Serial1.println("w axis0.controller.config.vel_limit 50.0"); delay(20);
+    Serial1.println("w axis1.controller.config.vel_limit 50.0"); delay(20);
 
-    Serial1.println("w axis0.requested_state 1"); delay(30);
-    Serial1.println("w axis0.controller.config.control_mode 2"); delay(30);
-    Serial1.println("w axis0.controller.config.input_mode 1"); delay(30);
-    Serial1.println("w axis0.requested_state 8"); delay(30);
+    Serial1.println("w axis0.requested_state 1"); delay(20);
+    Serial1.println("w axis0.controller.config.control_mode 2"); delay(20);
+    Serial1.println("w axis0.controller.config.input_mode 1"); delay(20);
+    Serial1.println("w axis0.requested_state 8"); delay(20);
 
-    Serial1.println("w axis1.requested_state 1"); delay(30);
-    Serial1.println("w axis1.controller.config.control_mode 2"); delay(30);
-    Serial1.println("w axis1.controller.config.input_mode 1"); delay(30);
-    Serial1.println("w axis1.requested_state 8"); delay(30);
+    Serial1.println("w axis1.requested_state 1"); delay(20);
+    Serial1.println("w axis1.controller.config.control_mode 2"); delay(20);
+    Serial1.println("w axis1.controller.config.input_mode 1"); delay(20);
+    Serial1.println("w axis1.requested_state 8"); delay(20);
 }
 
 void setupODriveRear() {
-    odriveRear.println("w axis0.error 0"); delay(30);
-    odriveRear.println("w axis1.error 0"); delay(30);
-    odriveRear.println("c 0"); delay(30);
-    odriveRear.println("c 1"); delay(30);
+    odriveRear.println("w axis0.error 0"); delay(20);
+    odriveRear.println("w axis1.error 0"); delay(20);
+    odriveRear.println("c 0"); delay(20);
+    odriveRear.println("c 1"); delay(20);
 
-    // Boost motor current limits to 25A for maximum torque!
-    odriveRear.println("w axis0.motor.config.current_lim 25.0"); delay(30);
-    odriveRear.println("w axis1.motor.config.current_lim 25.0"); delay(30);
+    // Boost motor current limit to 40A and velocity limit to 50 RPS for MAXIMUM TORQUE!
+    odriveRear.println("w axis0.motor.config.current_lim 40.0"); delay(20);
+    odriveRear.println("w axis1.motor.config.current_lim 40.0"); delay(20);
+    odriveRear.println("w axis0.controller.config.vel_limit 50.0"); delay(20);
+    odriveRear.println("w axis1.controller.config.vel_limit 50.0"); delay(20);
 
-    odriveRear.println("w axis0.requested_state 1"); delay(30);
-    odriveRear.println("w axis0.controller.config.control_mode 2"); delay(30);
-    odriveRear.println("w axis0.controller.config.input_mode 1"); delay(30);
-    odriveRear.println("w axis0.requested_state 8"); delay(30);
+    odriveRear.println("w axis0.requested_state 1"); delay(20);
+    odriveRear.println("w axis0.controller.config.control_mode 2"); delay(20);
+    odriveRear.println("w axis0.controller.config.input_mode 1"); delay(20);
+    odriveRear.println("w axis0.requested_state 8"); delay(20);
 
-    odriveRear.println("w axis1.requested_state 1"); delay(30);
-    odriveRear.println("w axis1.controller.config.control_mode 2"); delay(30);
-    odriveRear.println("w axis1.controller.config.input_mode 1"); delay(30);
-    odriveRear.println("w axis1.requested_state 8"); delay(30);
+    odriveRear.println("w axis1.requested_state 1"); delay(20);
+    odriveRear.println("w axis1.controller.config.control_mode 2"); delay(20);
+    odriveRear.println("w axis1.controller.config.input_mode 1"); delay(20);
+    odriveRear.println("w axis1.requested_state 8"); delay(20);
 }
 
 void handleWebControlInput() {
