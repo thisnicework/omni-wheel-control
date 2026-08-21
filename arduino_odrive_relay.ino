@@ -2,12 +2,12 @@
  * arduino_odrive_relay.ino
  * 
  * Target MCU: Arduino Uno R4 WiFi
- * Purpose: Dual ODrive v3.6 Relay with Mac Local Server Client Polling (192.168.10.140:8000).
+ * Purpose: Dual ODrive v3.6 Relay with Instant Zero-Latency Direct UART Output.
  * 
- * Mac Local Server Architecture:
- *   - Mac hosts the Web UI server at http://192.168.10.140:8000.
- *   - Arduino connects as a Wi-Fi Client polling http://192.168.10.140:8000/api/poll every 50ms.
- *   - Also supports Render Cloud WSS MQTT (broker.hivemq.com:1883) & USB Serial.
+ * Fix for "Prints in Serial Monitor but ODrive doesn't move":
+ *   - Instant Direct Execution: Sends velocity commands ('v 0 6.0', 'v 1 -6.0') IMMEDIATELY inside executeCommand().
+ *   - Eliminates 50ms loop delay and prevents 'x' stop command from overwriting target velocities before transmission.
+ *   - Supports Mac Local Relay Server (192.168.10.140:8000), Cloud MQTT, & USB Serial.
  */
 
 #include <Arduino.h>
@@ -68,6 +68,9 @@ float targetVx = 0.0f;
 float targetVy = 0.0f;
 float currentVx = 0.0f;
 float currentVy = 0.0f;
+
+// Track last executed command key to avoid redundant logging
+char lastExecutedKey = ' ';
 
 // --- AUTO-ROAM MOTION VARIABLES ---
 enum StepState {
@@ -131,7 +134,7 @@ void setup() {
     delay(1000);
 
     Serial.println("\n==================================================");
-    Serial.println("  🤖 Arduino Uno R4 WiFi - Mac Server Client Mode  ");
+    Serial.println("  🤖 Arduino Uno R4 WiFi - Instant Direct Drive   ");
     Serial.println("==================================================");
 
     // Initialize ODrives into Closed Loop Velocity Control once at boot
@@ -328,7 +331,7 @@ void rearmODrivesIfNeeded() {
 }
 
 /**
- * Central Command Executor - Non-blocking Ultra-Fast Velocity Update
+ * Central Command Executor - INSTANT DIRECT UART OUTPUT
  */
 void executeCommand(char key, const char* source) {
     if (key == 'w') {
@@ -337,8 +340,15 @@ void executeCommand(char key, const char* source) {
         rearmODrivesIfNeeded();
         targetVx = 0.0f;
         targetVy = currentDriveSpeed;
-        Serial.print("🌐 ["); Serial.print(source); Serial.print(" Received] Cmd: 'W' -> FORWARD (");
-        Serial.print(currentDriveSpeed); Serial.println(" turns/s)");
+        currentVx = targetVx;
+        currentVy = targetVy;
+        moveRobotVelocities(currentVx, currentVy); // INSTANT DIRECT UART OUTPUT!
+
+        if (lastExecutedKey != 'w') {
+            lastExecutedKey = 'w';
+            Serial.print("🌐 ["); Serial.print(source); Serial.print(" Received] Cmd: 'W' -> FORWARD (");
+            Serial.print(currentDriveSpeed); Serial.println(" turns/s)");
+        }
     }
     else if (key == 's') {
         isAutoRoamEnabled = false;
@@ -346,8 +356,15 @@ void executeCommand(char key, const char* source) {
         rearmODrivesIfNeeded();
         targetVx = 0.0f;
         targetVy = -currentDriveSpeed;
-        Serial.print("🌐 ["); Serial.print(source); Serial.print(" Received] Cmd: 'S' -> BACKWARD (-");
-        Serial.print(currentDriveSpeed); Serial.println(" turns/s)");
+        currentVx = targetVx;
+        currentVy = targetVy;
+        moveRobotVelocities(currentVx, currentVy); // INSTANT DIRECT UART OUTPUT!
+
+        if (lastExecutedKey != 's') {
+            lastExecutedKey = 's';
+            Serial.print("🌐 ["); Serial.print(source); Serial.print(" Received] Cmd: 'S' -> BACKWARD (-");
+            Serial.print(currentDriveSpeed); Serial.println(" turns/s)");
+        }
     }
     else if (key == 'a') {
         isAutoRoamEnabled = false;
@@ -355,8 +372,15 @@ void executeCommand(char key, const char* source) {
         rearmODrivesIfNeeded();
         targetVx = -currentDriveSpeed;
         targetVy = 0.0f;
-        Serial.print("🌐 ["); Serial.print(source); Serial.print(" Received] Cmd: 'A' -> LEFT STRAFE (-");
-        Serial.print(currentDriveSpeed); Serial.println(" turns/s)");
+        currentVx = targetVx;
+        currentVy = targetVy;
+        moveRobotVelocities(currentVx, currentVy); // INSTANT DIRECT UART OUTPUT!
+
+        if (lastExecutedKey != 'a') {
+            lastExecutedKey = 'a';
+            Serial.print("🌐 ["); Serial.print(source); Serial.print(" Received] Cmd: 'A' -> LEFT STRAFE (-");
+            Serial.print(currentDriveSpeed); Serial.println(" turns/s)");
+        }
     }
     else if (key == 'd') {
         isAutoRoamEnabled = false;
@@ -364,18 +388,31 @@ void executeCommand(char key, const char* source) {
         rearmODrivesIfNeeded();
         targetVx = currentDriveSpeed;
         targetVy = 0.0f;
-        Serial.print("🌐 ["); Serial.print(source); Serial.print(" Received] Cmd: 'D' -> RIGHT STRAFE (");
-        Serial.print(currentDriveSpeed); Serial.println(" turns/s)");
+        currentVx = targetVx;
+        currentVy = targetVy;
+        moveRobotVelocities(currentVx, currentVy); // INSTANT DIRECT UART OUTPUT!
+
+        if (lastExecutedKey != 'd') {
+            lastExecutedKey = 'd';
+            Serial.print("🌐 ["); Serial.print(source); Serial.print(" Received] Cmd: 'D' -> RIGHT STRAFE (");
+            Serial.print(currentDriveSpeed); Serial.println(" turns/s)");
+        }
     }
     else if (key == 'x' || key == 'o') {
         isAutoRoamEnabled = false;
-        stopAllMotors();
-        Serial.print("🛑 ["); Serial.print(source); Serial.println(" Received] Cmd: STOP ALL");
+        if (targetVx != 0.0f || targetVy != 0.0f || lastExecutedKey != 'x') {
+            stopAllMotors();
+            if (lastExecutedKey != 'x') {
+                lastExecutedKey = 'x';
+                Serial.print("🛑 ["); Serial.print(source); Serial.println(" Received] Cmd: STOP ALL");
+            }
+        }
     }
     else if (key == 'i') {
         isAutoRoamEnabled = true;
         rearmODrivesIfNeeded();
         stateStartTime = millis();
+        lastExecutedKey = 'i';
         Serial.print("🤖 ["); Serial.print(source); Serial.println(" Received] Cmd: AUTO ROAM [I]");
     }
     else if (key >= '1' && key <= '9') {
