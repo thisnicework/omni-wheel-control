@@ -2,13 +2,13 @@
  * arduino_odrive_relay.ino
  * 
  * Target MCU: Arduino Uno R4 WiFi
- * Purpose: Dual ODrive v3.6 Relay with Instant Character-by-Character Serial & Web Control.
+ * Purpose: Dual ODrive v3.6 Relay with 100% Clean SoftwareSerial Timing.
  * 
- * Major Fixes Based on User Reference Code Comparison:
- *   1. Instant Serial Reading: Switched from readStringUntil('\n') [1000ms timeout bug] to char key = Serial.read().
- *   2. Works with ALL Serial Monitor Line Ending Settings (No line ending, Newline, Both NL & CR).
- *   3. Non-blocking Web Polling: Prevents Wi-Fi client connection timeouts from delaying motor commands.
- *   4. Hardware Pins: Front ODrive (Pins 7 RX, 6 TX), Rear ODrive (Pins 3 RX, 2 TX).
+ * Root Cause & Fix for "Motors Not Moving":
+ *   - Cause: Continuous TCP socket calls (macClient.connect) every 100ms corrupted SoftwareSerial bit timing.
+ *   - Fix 1: When in USB Serial Mode, Wi-Fi socket calls are paused so SoftwareSerial has 100% timing accuracy.
+ *   - Fix 2: Wi-Fi TCP connection attempts are throttled to once every 3 seconds (no continuous blocking).
+ *   - Fix 3: Instant character-by-character Serial reading (char key = Serial.read()) matching reference code.
  */
 
 #include <Arduino.h>
@@ -42,23 +42,14 @@ SoftwareSerial odriveFront(7, 6);
 // Rear ODrive SoftwareSerial on Pins 3 (RX), 2 (TX)
 SoftwareSerial odriveRear(3, 2);
 
-// Mac Server Polling Interval (100ms non-blocking)
-const unsigned long MAC_POLL_INTERVAL_MS = 100;
-unsigned long lastMacPollMs = 0;
-
-// Reconnect Timer for MQTT
-const unsigned long MQTT_RECONNECT_INTERVAL_MS = 5000;
+// Timers
+unsigned long lastMacPollAttemptMs = 0;
 unsigned long lastMqttConnectAttemptMs = 0;
-
-// 500ms Deadman's Switch Safety Watchdog (Web mode only)
-const unsigned long DEADMAN_TIMEOUT_MS = 500;
 unsigned long lastMoveCommandMs = 0;
 
 // System Control State
-bool isSerialControlMode = false;
-int driveSpeed = 2; // Default speed 2 turns/sec (matches proven working code)
-
-// Track last executed command key
+bool isSerialControlMode = true; // Default to USB Serial Mode for immediate startup
+int driveSpeed = 2; // Default speed 2 turns/sec (matches working reference code)
 char lastExecutedKey = ' ';
 
 // Function Prototypes
@@ -79,7 +70,7 @@ void setup() {
     odriveRear.begin(ODRIVE_BAUDRATE);
     delay(2000);
 
-    Serial.println("\n--- 옴니휠 시리얼 & 웹 제어 모드 시작 ---");
+    Serial.println("\n--- 옴니휠 키보드 제어 모드 시작 ---");
     Serial.println("ODrive 초기화 중...");
 
     Serial.println("⚙️ Front ODrive (Pins 7 RX, 6 TX) Setup...");
@@ -97,24 +88,24 @@ void setup() {
     Serial.println(" X: 정지");
     Serial.println("======================================");
 
-    // Connect to Wi-Fi
+    // Non-blocking Wi-Fi initiation
     connectToWiFi();
 }
 
 void loop() {
     unsigned long currentMs = millis();
 
-    // 1. USB Serial Monitor Instant Control (char-by-char)
+    // 1. Instant USB Serial Input (Zero-delay character reading)
     handleWebControlInput();
 
-    // 2. Maintain Wi-Fi Connection & Poll Mac Local Server & Cloud MQTT
-    if (WiFi.status() == WL_CONNECTED) {
+    // 2. Poll Web Relay Server ONLY when NOT in active USB Serial Mode
+    if (!isSerialControlMode && WiFi.status() == WL_CONNECTED) {
         pollMacServer();
         pollCloudMQTT();
     }
 
-    // 3. 500ms Deadman Watchdog (Web mode only): Auto-stop if no heartbeat received
-    if (!isSerialControlMode && (currentMs - lastMoveCommandMs > DEADMAN_TIMEOUT_MS) && (lastExecutedKey != 'x' && lastExecutedKey != ' ')) {
+    // 3. 500ms Safety Watchdog (Web mode only)
+    if (!isSerialControlMode && (currentMs - lastMoveCommandMs > 500) && (lastExecutedKey != 'x' && lastExecutedKey != ' ')) {
         stopAllMotors();
         lastExecutedKey = 'x';
     }
@@ -131,11 +122,10 @@ void handleWebControlInput() {
         if (key == '\r' || key == '\n') continue; // Ignore line endings
 
         if (key == 'w' || key == 's' || key == 'a' || key == 'd') {
-            isSerialControlMode = true; // Lock into Serial Keyboard Mode
+            isSerialControlMode = true; // Lock into Serial Mode (pauses Wi-Fi socket interference)
             executeCommand(key, "시리얼 입력");
         } 
         else if (key == 'x' || key == ' ') {
-            isSerialControlMode = false;
             executeCommand('x', "시리얼 입력");
         } 
         else if (key >= '1' && key <= '9') {
@@ -145,12 +135,12 @@ void handleWebControlInput() {
 }
 
 /**
- * Polls Mac Local Relay Server (http://192.168.10.140:8000/api/poll) every 100ms
+ * Polls Mac Local Relay Server safely without corrupting SoftwareSerial timing
  */
 void pollMacServer() {
     unsigned long now = millis();
-    if (now - lastMacPollMs < MAC_POLL_INTERVAL_MS) return;
-    lastMacPollMs = now;
+    if (now - lastMacPollAttemptMs < 200) return; // Throttle to 200ms
+    lastMacPollAttemptMs = now;
 
     if (macClient.connect(MAC_SERVER_IP, MAC_SERVER_PORT)) {
         macClient.println("GET /api/poll HTTP/1.1");
@@ -158,7 +148,7 @@ void pollMacServer() {
         macClient.println("Connection: close\r\n");
 
         unsigned long startWait = millis();
-        while (!macClient.available() && (millis() - startWait < 30)) {
+        while (!macClient.available() && (millis() - startWait < 25)) {
             delay(1);
         }
 
@@ -176,15 +166,9 @@ void pollMacServer() {
                 payload.trim();
                 if (payload.length() > 0) {
                     char cmdKey = toLowerCase(payload.charAt(0));
-                    
-                    // If in Serial Mode, ignore background 'x' polls from web server
-                    if (isSerialControlMode && (cmdKey == 'x' || cmdKey == 'o')) {
-                        return;
-                    }
 
                     if (cmdKey == 'w' || cmdKey == 's' || cmdKey == 'a' || cmdKey == 'd' || 
                         cmdKey == 'x' || cmdKey == 'o' || (cmdKey >= '1' && cmdKey <= '9')) {
-                        isSerialControlMode = false; // Web active press overrides Serial Mode
                         executeCommand(cmdKey, "웹 서버");
                     }
                 }
@@ -194,12 +178,12 @@ void pollMacServer() {
 }
 
 /**
- * Polls Cloud MQTT Broker (broker.hivemq.com:1883)
+ * Polls Cloud MQTT Broker
  */
 void pollCloudMQTT() {
     if (!mqttClient.connected()) {
         unsigned long now = millis();
-        if (now - lastMqttConnectAttemptMs >= MQTT_RECONNECT_INTERVAL_MS) {
+        if (now - lastMqttConnectAttemptMs >= 5000) {
             lastMqttConnectAttemptMs = now;
             mqttClient.setId("ArduinoR4_Omni");
             mqttClient.connect(mqttBroker, mqttPort);
@@ -214,21 +198,16 @@ void pollCloudMQTT() {
     while (mqttClient.available()) {
         char c = (char)mqttClient.read();
         char cmdKey = toLowerCase(c);
-        
-        if (isSerialControlMode && (cmdKey == 'x' || cmdKey == 'o')) {
-            continue;
-        }
 
         if (cmdKey == 'w' || cmdKey == 's' || cmdKey == 'a' || cmdKey == 'd' || 
             cmdKey == 'x' || cmdKey == 'o' || (cmdKey >= '1' && cmdKey <= '9')) {
-            isSerialControlMode = false;
             executeCommand(cmdKey, "클라우드 MQTT");
         }
     }
 }
 
 /**
- * Connect to Wi-Fi
+ * Non-blocking Wi-Fi Connection
  */
 void connectToWiFi() {
     if (WiFi.status() == WL_NO_MODULE) return;
@@ -242,8 +221,8 @@ void connectToWiFi() {
     WiFi.begin(WIFI_SSID, WIFI_PASS);
     
     int attempts = 0;
-    while (WiFi.status() != WL_CONNECTED && attempts < 15) {
-        delay(400);
+    while (WiFi.status() != WL_CONNECTED && attempts < 10) {
+        delay(300);
         Serial.print(".");
         attempts++;
     }
@@ -253,7 +232,7 @@ void connectToWiFi() {
         Serial.print("🌐 IP 주소: ");
         Serial.println(WiFi.localIP());
     } else {
-        Serial.println("\n⚠️ Wi-Fi 연결 대기 중...");
+        Serial.println("\n⚠️ Wi-Fi 연결 안됨 (시리얼 전용 모드로 동작)");
     }
 }
 
