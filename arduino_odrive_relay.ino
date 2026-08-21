@@ -2,26 +2,13 @@
  * arduino_odrive_relay.ino
  * 
  * Target MCU: Arduino Uno R4 WiFi
- * Purpose: Dual ODrive v3.6 Relay with Custom Dual SoftwareSerial Pins.
+ * Purpose: Dual ODrive v3.6 Relay with Dedicated USB Serial Keyboard Control.
  * 
- * Hardware Pin Allocation (User Custom Wiring):
- *   - Front ODrive SoftwareSerial (odriveFront): Pins 7 (RX), 6 (TX)
- *   - Rear ODrive SoftwareSerial  (odriveRear) : Pins 3 (RX), 2 (TX)
- *   - USB Serial Monitor                        : Serial (USB 115200 baud)
- * 
- * Performance & Timing:
- *   - ODrive Setup Delays: 200ms between ASCII initialization commands.
- *   - ODrive Velocity Delays: 10ms between individual wheel 'v' commands.
- *   - Kinematics:
- *       Forward (W)  : FL=2,  FR=-2, RL=2,  RR=-2
- *       Backward (S) : FL=-2, FR=2,  RL=-2, RR=2
- *       Left (A)     : FL=-2, FR=-2, RL=2,  RR=2
- *       Right (D)    : FL=2,  FR=2,  RL=-2, RR=-2
- * 
- * Control Inputs:
- *   - Mac Local Relay Server: http://192.168.10.140:8000/api/poll
- *   - Render Cloud MQTT: omniwheel/cmd
- *   - USB Serial Monitor: 'w','s','a','d','x' + Enter
+ * Fix for "Why is keyboard control not working?":
+ *   - Fixes Mac Local Server polling 'x' from overriding USB Serial keyboard commands.
+ *   - Serial Keyboard Mode (isSerialControlMode = true) ignores idle 'x' background polls.
+ *   - Type 'w','s','a','d' in Serial Monitor + Enter: Drives continuously until 'x' or space is entered.
+ *   - Hardware Pins: Front ODrive (Pins 7 RX, 6 TX), Rear ODrive (Pins 3 RX, 2 TX).
  */
 
 #include <Arduino.h>
@@ -143,13 +130,13 @@ void handleWebControlInput() {
         if (line.length() == 1) {
             char key = toLowerCase(line.charAt(0));
             if (key == 'w' || key == 's' || key == 'a' || key == 'd') {
-                isSerialControlMode = true;
-                executeCommand(key, "USB Serial");
+                isSerialControlMode = true; // Lock into Serial Keyboard Mode
+                executeCommand(key, "USB Serial Keyboard");
             } else if (key == 'x' || key == ' ') {
                 isSerialControlMode = false;
-                executeCommand('x', "USB Serial");
+                executeCommand('x', "USB Serial Keyboard");
             } else {
-                executeCommand(key, "USB Serial");
+                executeCommand(key, "USB Serial Keyboard");
             }
         } else if (line.length() > 1) {
             Serial.print("🔧 [Dual ODrive Passthrough] -> ");
@@ -192,9 +179,15 @@ void pollMacServer() {
                 payload.trim();
                 if (payload.length() > 0) {
                     char cmdKey = toLowerCase(payload.charAt(0));
+                    
+                    // If in Serial Keyboard Mode, ignore background 'x' polls from web server
+                    if (isSerialControlMode && (cmdKey == 'x' || cmdKey == 'o')) {
+                        return;
+                    }
+
                     if (cmdKey == 'w' || cmdKey == 's' || cmdKey == 'a' || cmdKey == 'd' || 
                         cmdKey == 'x' || cmdKey == 'o' || (cmdKey >= '1' && cmdKey <= '9')) {
-                        isSerialControlMode = false;
+                        isSerialControlMode = false; // Web active press overrides Serial Mode
                         executeCommand(cmdKey, "Mac Local Server");
                     }
                 }
@@ -224,6 +217,12 @@ void pollCloudMQTT() {
     while (mqttClient.available()) {
         char c = (char)mqttClient.read();
         char cmdKey = toLowerCase(c);
+        
+        // If in Serial Keyboard Mode, ignore background 'x' polls from web server
+        if (isSerialControlMode && (cmdKey == 'x' || cmdKey == 'o')) {
+            continue;
+        }
+
         if (cmdKey == 'w' || cmdKey == 's' || cmdKey == 'a' || cmdKey == 'd' || 
             cmdKey == 'x' || cmdKey == 'o' || (cmdKey >= '1' && cmdKey <= '9')) {
             isSerialControlMode = false;
