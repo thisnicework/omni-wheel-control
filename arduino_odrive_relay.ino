@@ -2,11 +2,11 @@
  * arduino_odrive_relay.ino
  * 
  * Target MCU: Arduino Uno R4 WiFi
- * Purpose: Dual ODrive v3.6 Relay with Dual SoftwareSerial (No HardwareSerial TX1).
+ * Purpose: Dual ODrive v3.6 Relay with Custom Dual SoftwareSerial Pins.
  * 
- * Hardware Pin Allocation:
- *   - Front ODrive SoftwareSerial (odriveFront): Pins 10 (RX), 9 (TX)
- *   - Rear ODrive SoftwareSerial  (odriveRear) : Pins 12 (RX), 11 (TX)
+ * Hardware Pin Allocation (User Custom Wiring):
+ *   - Front ODrive SoftwareSerial (odriveFront): Pins 7 (RX), 6 (TX)
+ *   - Rear ODrive SoftwareSerial  (odriveRear) : Pins 3 (RX), 2 (TX)
  *   - USB Serial Monitor                        : Serial (USB 115200 baud)
  * 
  * Performance & Timing:
@@ -49,11 +49,11 @@ WiFiClient wifiClient;
 WiFiClient macClient;
 MqttClient mqttClient(wifiClient);
 
-// Front ODrive SoftwareSerial on Pins 10 (RX), 9 (TX)
-SoftwareSerial odriveFront(10, 9);
+// Front ODrive SoftwareSerial on Pins 7 (RX), 6 (TX)
+SoftwareSerial odriveFront(7, 6);
 
-// Rear ODrive SoftwareSerial on Pins 12 (RX), 11 (TX)
-SoftwareSerial odriveRear(12, 11);
+// Rear ODrive SoftwareSerial on Pins 3 (RX), 2 (TX)
+SoftwareSerial odriveRear(3, 2);
 
 // Mac Server Polling Interval (50ms)
 const unsigned long MAC_POLL_INTERVAL_MS = 50;
@@ -96,10 +96,10 @@ void setup() {
     Serial.println("  🤖 Omni-Wheel Dual SoftwareSerial Relay Controller ");
     Serial.println("==================================================");
 
-    Serial.println("⚙️ Initializing Front ODrive (Pins 10 RX, 9 TX)...");
+    Serial.println("⚙️ Initializing Front ODrive (Pins 7 RX, 6 TX)...");
     setupSoftwareSerial(odriveFront);
 
-    Serial.println("⚙️ Initializing Rear ODrive (Pins 12 RX, 11 TX)...");
+    Serial.println("⚙️ Initializing Rear ODrive (Pins 3 RX, 2 TX)...");
     setupSoftwareSerial(odriveRear);
 
     stopAllMotors(); // Safety stop
@@ -329,13 +329,13 @@ void executeCommand(char key, const char* source) {
  * Dual SoftwareSerial Omniwheel Drive Kinematics with 10ms Delays
  */
 void moveRobot(int fl, int fr, int rl, int rr) {
-    // Front Wheels (odriveFront: Pins 10 RX, 9 TX)
+    // Front Wheels (odriveFront: Pins 7 RX, 6 TX)
     odriveFront.print("v 0 "); odriveFront.println(fl); // 2사분면 (FL)
     delay(10);
     odriveFront.print("v 1 "); odriveFront.println(fr); // 1사분면 (FR)
     delay(10);
 
-    // Rear Wheels (odriveRear: Pins 12 RX, 11 TX)
+    // Rear Wheels (odriveRear: Pins 3 RX, 2 TX)
     odriveRear.print("v 1 "); odriveRear.println(rl); // 3사분면 (RL)
     delay(10);
     odriveRear.print("v 0 "); odriveRear.println(rr); // 4사분면 (RR)
