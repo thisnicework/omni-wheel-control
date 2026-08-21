@@ -2,7 +2,13 @@
  * arduino_odrive_relay.ino
  * 
  * Target MCU: Arduino Uno R4 WiFi
- * Purpose: Dual ODrive v3.6 Relay with Optimized Fast Socket Local Web Server (Port 80).
+ * Purpose: Dual ODrive v3.6 Relay with Auto-Recovery, Non-Blocking USB & High Speed Wi-Fi.
+ * 
+ * Fixes for "Intermittent / Stops Working" (되다 안돼):
+ *   1. Non-blocking USB Serial (Serial.availableForWrite() check) prevents MCU freezes when USB buffer is full.
+ *   2. Auto-Recovery & Re-Arm: Clears ODrive axis errors ("c 0") and enforces State 8 (Closed Loop) on every movement command.
+ *   3. Zero-delay Wi-Fi Web Server: 0ms non-blocking socket handling.
+ *   4. Smooth 20Hz continuous velocity stream to all 4 motors.
  */
 
 #include <Arduino.h>
@@ -77,6 +83,7 @@ void handleLocalWebClients();
 void printStatusHeartbeat();
 void setupODriveFront();
 void setupODriveRear();
+void rearmODrives();
 void pollODrives();
 void processSerial1();
 void processSoftSerial();
@@ -98,7 +105,7 @@ void setup() {
     delay(1000);
 
     Serial.println("\n==================================================");
-    Serial.println("  🤖 Arduino Uno R4 WiFi - High Speed Web System  ");
+    Serial.println("  🤖 Arduino Uno R4 WiFi - High Reliability System");
     Serial.println("==================================================");
 
     // Initialize ODrives into Closed Loop Velocity Control
@@ -113,7 +120,7 @@ void setup() {
     connectToWiFi();
 
     Serial.println("==================================================");
-    Serial.println("▶️ Ready! Controlling via Wi-Fi Web Server & USB...");
+    Serial.println("▶️ Ready! Send commands via WASD, Local Web, or USB.");
     Serial.println("==================================================\n");
 }
 
@@ -121,12 +128,12 @@ void loop() {
     unsigned long currentMicros = micros();
     unsigned long currentMs = millis();
 
-    // 1. Fast Socket Local Web Requests (Port 80)
+    // 1. Zero-Delay Local Web Requests (Port 80)
     if (WiFi.status() == WL_CONNECTED) {
         handleLocalWebClients();
     }
 
-    // 2. Real-Time USB Serial Commands
+    // 2. Real-Time USB Serial Backup Commands
     handleWebControlInput();
 
     // 3. 20Hz Encoder Feedback Polling
@@ -161,7 +168,7 @@ void loop() {
 }
 
 /**
- * Connect to Wi-Fi & Start Non-Blocking Local Web Server
+ * Connect to Wi-Fi & Start Local Web Server
  */
 void connectToWiFi() {
     if (WiFi.status() == WL_NO_MODULE) {
@@ -195,21 +202,17 @@ void connectToWiFi() {
 }
 
 /**
- * Optimized Socket Handling for Instant Web Requests (Port 80)
+ * Fast 0ms Non-Blocking Socket Handling
  */
 void handleLocalWebClients() {
     WiFiClient client = localServer.available();
     if (!client) return;
 
     String request = "";
-    unsigned long timeout = millis();
-    while (client.connected() && (millis() - timeout < 150)) {
-        while (client.available()) {
-            char c = client.read();
-            request += c;
-            if (c == '\n') break;
-        }
-        if (request.indexOf('\n') != -1) break;
+    while (client.available()) {
+        char c = client.read();
+        request += c;
+        if (c == '\n') break;
     }
 
     if (request.length() > 0) {
@@ -222,7 +225,7 @@ void handleLocalWebClients() {
             }
         }
 
-        // Fast CORS-enabled Minimal Response
+        // Send Fast HTTP Response
         client.println("HTTP/1.1 200 OK");
         client.println("Content-Type: text/plain");
         client.println("Access-Control-Allow-Origin: *");
@@ -235,11 +238,25 @@ void handleLocalWebClients() {
 }
 
 /**
+ * Re-arms ODrive motors: clears errors and enforces Closed Loop Mode 8
+ */
+void rearmODrives() {
+    Serial1.println("c 0");
+    Serial1.println("w axis0.requested_state 8");
+    Serial1.println("w axis1.requested_state 8");
+
+    odriveRear.println("c 0");
+    odriveRear.println("w axis0.requested_state 8");
+    odriveRear.println("w axis1.requested_state 8");
+}
+
+/**
  * Central Command Executor
  */
 void executeCommand(char key, const char* source) {
     if (key == 'w') {
         isAutoRoamEnabled = false;
+        rearmODrives(); // Ensure ODrives are cleared of errors and armed
         targetVx = 0.0f;
         targetVy = currentDriveSpeed;
         Serial.print("⚡ ["); Serial.print(source); Serial.print("] Cmd 'W' -> FORWARD (");
@@ -247,6 +264,7 @@ void executeCommand(char key, const char* source) {
     }
     else if (key == 's') {
         isAutoRoamEnabled = false;
+        rearmODrives();
         targetVx = 0.0f;
         targetVy = -currentDriveSpeed;
         Serial.print("⚡ ["); Serial.print(source); Serial.print("] Cmd 'S' -> BACKWARD (-");
@@ -254,6 +272,7 @@ void executeCommand(char key, const char* source) {
     }
     else if (key == 'a') {
         isAutoRoamEnabled = false;
+        rearmODrives();
         targetVx = -currentDriveSpeed;
         targetVy = 0.0f;
         Serial.print("⚡ ["); Serial.print(source); Serial.print("] Cmd 'A' -> LEFT STRAFE (-");
@@ -261,6 +280,7 @@ void executeCommand(char key, const char* source) {
     }
     else if (key == 'd') {
         isAutoRoamEnabled = false;
+        rearmODrives();
         targetVx = currentDriveSpeed;
         targetVy = 0.0f;
         Serial.print("⚡ ["); Serial.print(source); Serial.print("] Cmd 'D' -> RIGHT STRAFE (");
@@ -275,6 +295,7 @@ void executeCommand(char key, const char* source) {
     }
     else if (key == 'i') {
         isAutoRoamEnabled = true;
+        rearmODrives();
         stateStartTime = millis();
         Serial.print("⚡ ["); Serial.print(source); Serial.println("] Cmd 'I' -> AUTO ROAM");
     }
@@ -357,21 +378,23 @@ void handleWebControlInput() {
 }
 
 void printStatusHeartbeat() {
-    Serial.print("💬 [HEARTBEAT ");
-    Serial.print(millis() / 1000);
-    Serial.print("s] Wi-Fi Server: http://");
-    Serial.print(WiFi.localIP());
-    Serial.print(" | Mode: ");
-    Serial.print(isAutoRoamEnabled ? "AUTO" : "MANUAL");
-    Serial.print(" | Target Vx,Vy: [");
-    Serial.print(targetVx, 1); Serial.print(",");
-    Serial.print(targetVy, 1);
-    Serial.print("] | Encoders: [");
-    Serial.print(encoderPositions[0], 1); Serial.print(",");
-    Serial.print(encoderPositions[1], 1); Serial.print(",");
-    Serial.print(encoderPositions[2], 1); Serial.print(",");
-    Serial.print(encoderPositions[3], 1);
-    Serial.println("]");
+    if (Serial.availableForWrite() > 30) {
+        Serial.print("💬 [HEARTBEAT ");
+        Serial.print(millis() / 1000);
+        Serial.print("s] Wi-Fi Server: http://");
+        Serial.print(WiFi.localIP());
+        Serial.print(" | Mode: ");
+        Serial.print(isAutoRoamEnabled ? "AUTO" : "MANUAL");
+        Serial.print(" | Target Vx,Vy: [");
+        Serial.print(targetVx, 1); Serial.print(",");
+        Serial.print(targetVy, 1);
+        Serial.print("] | Encoders: [");
+        Serial.print(encoderPositions[0], 1); Serial.print(",");
+        Serial.print(encoderPositions[1], 1); Serial.print(",");
+        Serial.print(encoderPositions[2], 1); Serial.print(",");
+        Serial.print(encoderPositions[3], 1);
+        Serial.println("]");
+    }
 }
 
 void updateAutoRoamMotion() {
@@ -471,11 +494,13 @@ void parseRearLine(const char* line) {
 }
 
 void sendCSVToMac() {
-    Serial.print(encoderPositions[0], 4);
-    Serial.print(",");
-    Serial.print(encoderPositions[1], 4);
-    Serial.print(",");
-    Serial.print(encoderPositions[2], 4);
-    Serial.print(",");
-    Serial.println(encoderPositions[3], 4);
+    if (Serial.availableForWrite() > 30) {
+        Serial.print(encoderPositions[0], 4);
+        Serial.print(",");
+        Serial.print(encoderPositions[1], 4);
+        Serial.print(",");
+        Serial.print(encoderPositions[2], 4);
+        Serial.print(",");
+        Serial.println(encoderPositions[3], 4);
+    }
 }
