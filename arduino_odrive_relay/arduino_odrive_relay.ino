@@ -2,16 +2,17 @@
  * arduino_odrive_relay.ino
  * 
  * Target MCU: Arduino Uno R4 WiFi
- * Purpose: Dual ODrive v3.6 Relay with Live ODrive Response Relay & Diagnostic Passthrough.
+ * Purpose: Dual ODrive v3.6 Relay with Dual Cloud MQTT (broker.hivemq.com:1883) & Local Web (Port 80).
  * 
- * Diagnostic Features:
- *   - Relays commands 'w','s','a','d','x','i' to ODrives and checks ODrive state.
- *   - Allows raw ODrive commands (e.g. "r axis0.error", "v 0 3.0") sent via USB/Web to be passed directly to ODrives.
- *   - Prints ODrive responses ("axis0.error = 0x0", etc.) back to USB Serial for 100% transparent debugging.
+ * Multi-Channel Architecture:
+ *   1. Cloud MQTT (broker.hivemq.com:1883): Receives WSS commands published from https://omni-wheel-control.onrender.com/ globally over the Internet!
+ *   2. Local Web Server (Port 80): 1ms zero-latency control at http://<Arduino_IP>/
+ *   3. USB Serial (115200 baud): Real-time cable backup.
  */
 
 #include <Arduino.h>
 #include <WiFiS3.h>
+#include <ArduinoMqttClient.h>
 #include <SoftwareSerial.h>
 
 #define MAC_BAUDRATE 115200
@@ -20,6 +21,14 @@
 // --- WI-FI CREDENTIALS ---
 const char* WIFI_SSID = "sanhak";      // Wi-Fi SSID
 const char* WIFI_PASS = "20020520";  // Wi-Fi Password
+
+// --- CLOUD MQTT BROKER ---
+const char mqttBroker[] = "broker.hivemq.com";
+const int   mqttPort   = 1883;
+const char topicCmd[]  = "omniwheel/cmd";
+
+WiFiClient wifiClient;
+MqttClient mqttClient(wifiClient);
 
 // Local HTTP Web Server on Port 80
 WiFiServer localServer(80);
@@ -34,6 +43,10 @@ unsigned long lastPollMicros = 0;
 // 20Hz Continuous Velocity Update Loop (50ms)
 const unsigned long ROAM_INTERVAL_MS = 50;
 unsigned long lastRoamMs = 0;
+
+// 5-Second Status Heartbeat
+const unsigned long MQTT_RECONNECT_INTERVAL_MS = 3000;
+unsigned long lastMqttConnectAttemptMs = 0;
 
 // Encoder storage array: [Enc0 (FL), Enc1 (FR), Enc2 (RL), Enc3 (RR)]
 float encoderPositions[4] = {0.0f, 0.0f, 0.0f, 0.0f};
@@ -74,6 +87,7 @@ uint8_t axisQueryRear = 0;
 
 // Function Prototypes
 void connectToWiFi();
+void pollCloudMQTT();
 void handleLocalWebClients();
 void setupODriveFront();
 void setupODriveRear();
@@ -85,7 +99,6 @@ void parseFrontLine(const char* line);
 void parseRearLine(const char* line);
 void handleWebControlInput();
 void executeCommand(char key, const char* source);
-void sendRawODriveCommand(const char* cmd);
 void updateAutoRoamMotion();
 void moveRobotVelocities(float vx, float vy);
 void stopAllMotors();
@@ -99,7 +112,7 @@ void setup() {
     delay(1000);
 
     Serial.println("\n==================================================");
-    Serial.println("  🤖 Arduino Uno R4 WiFi - Dual ODrive Relay System");
+    Serial.println("  🤖 Arduino Uno R4 WiFi - Cloud MQTT Remote System");
     Serial.println("==================================================");
 
     // Initialize ODrives into Closed Loop Velocity Control
@@ -114,7 +127,7 @@ void setup() {
     connectToWiFi();
 
     Serial.println("==================================================");
-    Serial.println("▶️ System Ready! Controlling ODrives via Web & USB.");
+    Serial.println("▶️ System Ready! Listening on Render, MQTT & USB.");
     Serial.println("==================================================\n");
 }
 
@@ -122,12 +135,13 @@ void loop() {
     unsigned long currentMicros = micros();
     unsigned long currentMs = millis();
 
-    // 1. Local Web Server Requests (Port 80)
+    // 1. Maintain Cloud MQTT Connection & Parse Render Website Commands
     if (WiFi.status() == WL_CONNECTED) {
+        pollCloudMQTT();
         handleLocalWebClients();
     }
 
-    // 2. USB Serial Commands & Raw ODrive Passthrough
+    // 2. Real-Time USB Serial Commands
     handleWebControlInput();
 
     // 3. 20Hz Encoder Feedback Polling
@@ -152,6 +166,34 @@ void loop() {
     // 5. Asynchronously read incoming ODrive response lines
     processSerial1();
     processSoftSerial();
+}
+
+/**
+ * Polls Cloud MQTT Broker (broker.hivemq.com:1883) for commands sent from Render Website
+ */
+void pollCloudMQTT() {
+    if (!mqttClient.connected()) {
+        unsigned long now = millis();
+        if (now - lastMqttConnectAttemptMs >= MQTT_RECONNECT_INTERVAL_MS) {
+            lastMqttConnectAttemptMs = now;
+            mqttClient.setId("ArduinoR4_Omni");
+            if (mqttClient.connect(mqttBroker, mqttPort)) {
+                mqttClient.subscribe(topicCmd);
+                Serial.println("✅ Connected to Cloud MQTT Broker (omniwheel/cmd)!");
+            }
+        }
+        return;
+    }
+
+    mqttClient.poll();
+    while (mqttClient.available()) {
+        char c = (char)mqttClient.read();
+        char cmdKey = toLowerCase(c);
+        if (cmdKey == 'w' || cmdKey == 's' || cmdKey == 'a' || cmdKey == 'd' || 
+            cmdKey == 'x' || cmdKey == 'o' || cmdKey == 'i' || (cmdKey >= '1' && cmdKey <= '9')) {
+            executeCommand(cmdKey, "Render Cloud MQTT");
+        }
+    }
 }
 
 /**
@@ -227,7 +269,6 @@ void handleLocalWebClients() {
  * Re-arms ODrive motors: clears errors and enforces Closed Loop Mode 8
  */
 void rearmODrives() {
-    // Front ODrive (Serial1)
     Serial1.println("w axis0.error 0");
     Serial1.println("w axis1.error 0");
     Serial1.println("c 0");
@@ -235,7 +276,6 @@ void rearmODrives() {
     Serial1.println("w axis0.requested_state 8");
     Serial1.println("w axis1.requested_state 8");
 
-    // Rear ODrive (SoftwareSerial)
     odriveRear.println("w axis0.error 0");
     odriveRear.println("w axis1.error 0");
     odriveRear.println("c 0");
@@ -376,7 +416,6 @@ void handleWebControlInput() {
             char key = toLowerCase(line.charAt(0));
             executeCommand(key, "USB Serial");
         } else if (line.length() > 1) {
-            // Passthrough raw ODrive command
             Serial.print("🔧 [ODrive Passthrough] -> ");
             Serial.println(line);
             Serial1.println(line);

@@ -2,9 +2,10 @@
  * app.js
  * Omni-wheel Robot Controller Engine
  * 
- * Direct Render Cloud Connection (omni-wheel-control.onrender.com)
- *   - Automatic Web Serial (USB)
- *   - Automatic Render Cloud API (/api/cmd?set=w)
+ * Multi-Channel Control Dispatcher:
+ *   1. Cloud MQTT WSS (wss://broker.hivemq.com:8884/mqtt) -> Works 100% on Render HTTPS!
+ *   2. USB Web Serial (Local Cable Backup)
+ *   3. Render REST API Backup (/api/cmd?set=w)
  */
 
 // ==========================================
@@ -130,25 +131,54 @@ class SerialController {
 
 
 // ==========================================
-// 2. RENDER CLOUD CONTROLLER
+// 2. CLOUD MQTT WSS CONTROLLER (RENDER HTTPS COMPATIBLE)
 // ==========================================
-class RenderCloudController {
+class CloudMqttWssController {
     constructor(onStatusChange) {
         this.onStatusChange = onStatusChange;
-        this.isConnected = true;
-        if (this.onStatusChange) this.onStatusChange(true, 'RENDER CLOUD ACTIVE');
+        this.client = null;
+        this.isConnected = false;
+        this.connect();
+    }
+
+    connect() {
+        console.log('[Cloud MQTT WSS] Connecting to WSS Cloud Broker (broker.hivemq.com:8884)...');
+        try {
+            if (typeof mqtt === 'undefined') {
+                console.warn('MQTT.js library not loaded yet');
+                return;
+            }
+            this.client = mqtt.connect('wss://broker.hivemq.com:8884/mqtt', {
+                clientId: 'OmniWeb_' + Math.random().toString(16).substr(2, 8),
+                clean: true,
+                connectTimeout: 5000,
+                reconnectPeriod: 2500
+            });
+
+            this.client.on('connect', () => {
+                console.log('✅ [Cloud MQTT WSS] Connected to WSS Cloud Broker!');
+                this.isConnected = true;
+                if (this.onStatusChange) this.onStatusChange(true, 'CLOUD MQTT ACTIVE');
+            });
+
+            this.client.on('offline', () => {
+                this.isConnected = false;
+                if (this.onStatusChange) this.onStatusChange(false, 'CLOUD OFFLINE');
+            });
+
+            this.client.on('error', (err) => {
+                console.warn('[Cloud MQTT Error]', err);
+            });
+        } catch (e) {
+            console.error('[Cloud MQTT Exception]', e);
+        }
     }
 
     send(cmd) {
-        // Send command to Render Cloud Server (/api/cmd?set=w)
-        fetch('/api/cmd?set=' + cmd)
-            .then(res => res.json())
-            .then(data => {
-                console.log(`⚡ [Render Cloud Sent] GET /api/cmd?set=${cmd}`);
-            })
-            .catch(err => {
-                console.warn('[Render Cloud Error]', err);
-            });
+        if (this.client && this.isConnected) {
+            this.client.publish('omniwheel/cmd', cmd);
+            console.log(`⚡ [Cloud MQTT Published] Sent '${cmd}' to omniwheel/cmd`);
+        }
     }
 }
 
@@ -157,13 +187,11 @@ class RenderCloudController {
 // 3. MULTI-CHANNEL CONTROL DISPATCHER
 // ==========================================
 class RobotControlDispatcher {
-    constructor(serialController, renderCloudController, statusBadge, statusText) {
+    constructor(serialController, cloudMqttController, statusBadge, statusText) {
         this.serialController = serialController;
-        this.renderCloudController = renderCloudController;
+        this.cloudMqttController = cloudMqttController;
         this.statusBadge = statusBadge;
         this.statusText = statusText;
-        
-        this.updateStatus(true, 'RENDER CLOUD ACTIVE');
     }
 
     updateStatus(isConnected, text) {
@@ -179,15 +207,18 @@ class RobotControlDispatcher {
     }
 
     send(cmd) {
-        // 1. Send via USB Web Serial if connected
+        // Path 1: Cloud MQTT WSS (Works over Render HTTPS!)
+        if (this.cloudMqttController) {
+            this.cloudMqttController.send(cmd);
+        }
+
+        // Path 2: USB Web Serial (Local Cable Backup)
         if (this.serialController && this.serialController.port) {
             this.serialController.send(cmd);
         }
 
-        // 2. Send via Render Cloud Server (/api/cmd?set=w)
-        if (this.renderCloudController) {
-            this.renderCloudController.send(cmd);
-        }
+        // Path 3: Render REST API Backup (/api/cmd?set=w)
+        fetch('/api/cmd?set=' + cmd).catch(() => {});
     }
 }
 
@@ -217,11 +248,11 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     );
 
-    const renderCloudController = new RenderCloudController((isConnected, label) => {
+    const cloudMqttController = new CloudMqttWssController((isConnected, label) => {
         dispatcher.updateStatus(isConnected, label);
     });
 
-    const dispatcher = new RobotControlDispatcher(serialController, renderCloudController, statusBadge, statusText);
+    const dispatcher = new RobotControlDispatcher(serialController, cloudMqttController, statusBadge, statusText);
 
     // USB Serial Connect Button
     if (btnConnect) {

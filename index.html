@@ -4,6 +4,8 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-select=no">
     <title>Omni-Wheel Robot Remote Controller</title>
+    <!-- MQTT.js Cloud Library -->
+    <script src="https://unpkg.com/mqtt/dist/mqtt.min.js"></script>
     <style>
         :root {
             --bg-color: #06090b;
@@ -93,9 +95,16 @@
             border-radius: 20px;
             font-size: 11px;
             font-weight: 600;
+            background: rgba(239, 68, 68, 0.15);
+            color: #f87171;
+            border: 1px solid rgba(239, 68, 68, 0.3);
+            transition: all 0.3s ease;
+        }
+
+        .status-badge.connected {
             background: rgba(16, 185, 129, 0.15);
             color: var(--accent-green);
-            border: 1px solid rgba(16, 185, 129, 0.4);
+            border-color: rgba(16, 185, 129, 0.4);
             box-shadow: 0 0 12px rgba(16, 185, 129, 0.2);
         }
 
@@ -269,7 +278,7 @@
 
         <div id="status-badge" class="status-badge">
             <span class="status-dot"></span>
-            <span id="status-text">RENDER CLOUD ACTIVE</span>
+            <span id="status-text">CONNECTING CLOUD...</span>
         </div>
 
         <!-- Cross D-Pad Buttons -->
@@ -295,7 +304,7 @@
 
         <!-- Backup Serial USB Option -->
         <button id="btn-connect" class="serial-btn">
-            🔌 Backup USB Serial Connect
+            🔌 USB Serial Connect (Local Backup)
         </button>
 
         <!-- Keyboard Guide -->
