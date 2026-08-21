@@ -2,14 +2,12 @@
  * arduino_odrive_relay.ino
  * 
  * Target MCU: Arduino Uno R4 WiFi
- * Purpose: Dual ODrive v3.6 Relay with Supabase Realtime & REST API Cloud Integration.
+ * Purpose: Dual ODrive v3.6 Relay with Continuous 20Hz Velocity Control Loop.
  * 
- * Architecture:
- *   - Wi-Fi Connection via WiFiS3
- *   - Supabase HTTPS REST API via WiFiSSLClient (Port 443)
- *   - Command Endpoint: GET /rest/v1/robot_command?id=eq.1&select=cmd
- *   - Telemetry Endpoint: PATCH /rest/v1/robot_telemetry?id=eq.1
- *   - Backup USB Serial CDC @ 115200 baud
+ * Fixes:
+ *   - Continuous 20Hz velocity output stream in loop() for both Manual WASD & Auto-Roam modes.
+ *   - Prevents single-keypress velocity dropouts or ODrive command timeouts.
+ *   - Dual ODrive initialization (Clear errors -> Idle -> Vel Control -> Passthrough -> Closed Loop).
  */
 
 #include <Arduino.h>
@@ -25,9 +23,8 @@ const char* WIFI_SSID = "sanhak";      // Wi-Fi SSID
 const char* WIFI_PASS = "20020520";  // Wi-Fi Password
 
 // --- SUPABASE CLOUD CONFIGURATION ---
-// Enter your Supabase Project URL and Anon Key below:
 const char* SUPABASE_HOST     = "your-project-id.supabase.co"; // e.g. "xyz123.supabase.co"
-const char* SUPABASE_ANON_KEY = "YOUR_SUPABASE_ANON_KEY";       // Your Supabase Anon Public Key
+const char* SUPABASE_ANON_KEY = "YOUR_SUPABASE_ANON_KEY";       // Your Supabase Anon Key
 const int   SUPABASE_PORT     = 443;
 
 WiFiSSLClient sslClient;
@@ -43,7 +40,7 @@ unsigned long lastPollMicros = 0;
 const unsigned long SUPABASE_POLL_INTERVAL_MS = 300;
 unsigned long lastSupabasePollMs = 0;
 
-// 20Hz Auto Motion Update Loop (50ms)
+// 20Hz Continuous Velocity Update Loop (50ms)
 const unsigned long ROAM_INTERVAL_MS = 50;
 unsigned long lastRoamMs = 0;
 
@@ -56,8 +53,14 @@ float encoderPositions[4] = {0.0f, 0.0f, 0.0f, 0.0f};
 
 // System Motion State
 bool isAutoRoamEnabled = false;
-float currentDriveSpeed = 2.0f;
+float currentDriveSpeed = 2.0f; // Velocity turns/sec
 char lastExecutedCmd = ' ';
+
+// Continuous Target & Current Velocities (Vx, Vy)
+float targetVx = 0.0f;
+float targetVy = 0.0f;
+float currentVx = 0.0f;
+float currentVy = 0.0f;
 
 // --- AUTO-ROAM MOTION VARIABLES ---
 enum StepState {
@@ -71,8 +74,6 @@ unsigned long stateDuration = 2000;
 
 float fixedVx = 0.0f;
 float fixedVy = 0.0f;
-float currentVx = 0.0f;
-float currentVy = 0.0f;
 
 // Rx Buffers for line parsing
 const size_t RX_BUFFER_SIZE = 128;
@@ -112,10 +113,10 @@ void setup() {
     delay(1000);
 
     Serial.println("\n==================================================");
-    Serial.println("  ⚡ Arduino Uno R4 WiFi - Supabase Cloud System  ");
+    Serial.println("  🤖 Arduino Uno R4 WiFi - Dual ODrive System     ");
     Serial.println("==================================================");
 
-    // Initialize ODrives
+    // Initialize ODrives into Closed Loop Velocity Control
     setupODriveFront();
     setupODriveRear();
     stopAllMotors();
@@ -127,7 +128,7 @@ void setup() {
     connectToWiFi();
 
     Serial.println("==================================================");
-    Serial.println("▶️ Ready! Controlling via Supabase Cloud & USB Serial...");
+    Serial.println("▶️ Ready! Send commands via WASD, Web UI, or Supabase.");
     Serial.println("==================================================\n");
 }
 
@@ -141,20 +142,27 @@ void loop() {
         pollSupabaseCloud();
     }
 
-    // 2. Process USB Serial Backup Commands
+    // 2. Process Real-Time USB Serial Commands (WASD / D-Pad)
     handleWebControlInput();
 
-    // 3. 50Hz Non-blocking Encoder Feedback
+    // 3. 50Hz Non-blocking Encoder Feedback Polling
     if (currentMicros - lastPollMicros >= POLLING_INTERVAL_US) {
         lastPollMicros = currentMicros;
         pollODrives();
         sendCSVToMac();
     }
 
-    // 4. 20Hz Auto-Roam Motion
-    if (isAutoRoamEnabled && (currentMs - lastRoamMs >= ROAM_INTERVAL_MS)) {
+    // 4. 20Hz CONTINUOUS VELOCITY CONTROL LOOP (Continuous v 0 ... stream to ODrive)
+    if (currentMs - lastRoamMs >= ROAM_INTERVAL_MS) {
         lastRoamMs = currentMs;
-        updateAutoRoamMotion();
+        if (isAutoRoamEnabled) {
+            updateAutoRoamMotion();
+        } else {
+            // Smoothly ramp currentVx, currentVy towards targetVx, targetVy
+            currentVx += (targetVx - currentVx) * 0.30f;
+            currentVy += (targetVy - currentVy) * 0.30f;
+            moveRobotVelocities(currentVx, currentVy);
+        }
     }
 
     // 5. 5-Second Status Heartbeat
@@ -163,14 +171,127 @@ void loop() {
         printStatusHeartbeat();
     }
 
-    // 6. Asynchronously read incoming ODrive responses
+    // 6. Asynchronously read incoming ODrive response lines
     processSerial1();
     processSoftSerial();
 }
 
 /**
- * Wi-Fi Internet Connection Setup
+ * Central Command Executor
+ * Sets continuous target velocity targetVx, targetVy
  */
+void executeCommand(char key, const char* source) {
+    if (key == 'w') {
+        isAutoRoamEnabled = false;
+        targetVx = 0.0f;
+        targetVy = currentDriveSpeed; // Continuous Forward
+        Serial.print("⚡ ["); Serial.print(source); Serial.print("] Cmd 'W' -> FORWARD (");
+        Serial.print(currentDriveSpeed); Serial.println(" turns/s)");
+    }
+    else if (key == 's') {
+        isAutoRoamEnabled = false;
+        targetVx = 0.0f;
+        targetVy = -currentDriveSpeed; // Continuous Backward
+        Serial.print("⚡ ["); Serial.print(source); Serial.print("] Cmd 'S' -> BACKWARD (-");
+        Serial.print(currentDriveSpeed); Serial.println(" turns/s)");
+    }
+    else if (key == 'a') {
+        isAutoRoamEnabled = false;
+        targetVx = -currentDriveSpeed; // Continuous Left Strafe
+        targetVy = 0.0f;
+        Serial.print("⚡ ["); Serial.print(source); Serial.print("] Cmd 'A' -> LEFT STRAFE (-");
+        Serial.print(currentDriveSpeed); Serial.println(" turns/s)");
+    }
+    else if (key == 'd') {
+        isAutoRoamEnabled = false;
+        targetVx = currentDriveSpeed; // Continuous Right Strafe
+        targetVy = 0.0f;
+        Serial.print("⚡ ["); Serial.print(source); Serial.print("] Cmd 'D' -> RIGHT STRAFE (");
+        Serial.print(currentDriveSpeed); Serial.println(" turns/s)");
+    }
+    else if (key == 'x' || key == 'o' || key == ' ') {
+        isAutoRoamEnabled = false;
+        targetVx = 0.0f;
+        targetVy = 0.0f;
+        stopAllMotors();
+        Serial.print("⚡ ["); Serial.print(source); Serial.println("] Cmd STOP -> STOP ALL");
+    }
+    else if (key == 'i') {
+        isAutoRoamEnabled = true;
+        stateStartTime = millis();
+        Serial.print("⚡ ["); Serial.print(source); Serial.println("] Cmd 'I' -> AUTO ROAM");
+    }
+    else if (key >= '1' && key <= '9') {
+        currentDriveSpeed = 1.0f + (key - '1') * 0.45f;
+        Serial.print("⚡ ["); Serial.print(source); Serial.print("] Speed Level Set: ");
+        Serial.println(currentDriveSpeed);
+    }
+}
+
+/**
+ * Output velocity commands continuously to 4 Omniwheels (Zero Rotation)
+ */
+void moveRobotVelocities(float vx, float vy) {
+    float fl =  vy + vx;
+    float fr = -(vy - vx); // Right side motor mirrored 180°
+    float rl =  vy - vx;
+    float rr = -(vy + vx); // Right side motor mirrored 180°
+
+    Serial1.print("v 0 "); Serial1.println(fl, 2);
+    Serial1.print("v 1 "); Serial1.println(fr, 2);
+
+    odriveRear.print("v 1 "); odriveRear.println(rl, 2);
+    odriveRear.print("v 0 "); odriveRear.println(rr, 2);
+}
+
+void stopAllMotors() {
+    targetVx = 0.0f;
+    targetVy = 0.0f;
+    currentVx = 0.0f;
+    currentVy = 0.0f;
+
+    Serial1.println("v 0 0");
+    Serial1.println("v 1 0");
+    odriveRear.println("v 0 0");
+    odriveRear.println("v 1 0");
+}
+
+void setupODriveFront() {
+    Serial1.println("c 0"); delay(100); // Clear Axis 0 errors
+    Serial1.println("w axis0.requested_state 1"); delay(100); // IDLE
+    Serial1.println("w axis0.controller.config.control_mode 2"); delay(100); // VELOCITY_CONTROL
+    Serial1.println("w axis0.controller.config.input_mode 1"); delay(100); // PASSTHROUGH
+    Serial1.println("w axis0.requested_state 8"); delay(100); // CLOSED_LOOP_CONTROL
+
+    Serial1.println("c 1"); delay(100); // Clear Axis 1 errors
+    Serial1.println("w axis1.requested_state 1"); delay(100); // IDLE
+    Serial1.println("w axis1.controller.config.control_mode 2"); delay(100); // VELOCITY_CONTROL
+    Serial1.println("w axis1.controller.config.input_mode 1"); delay(100); // PASSTHROUGH
+    Serial1.println("w axis1.requested_state 8"); delay(100); // CLOSED_LOOP_CONTROL
+}
+
+void setupODriveRear() {
+    odriveRear.println("c 0"); delay(100); // Clear Axis 0 errors
+    odriveRear.println("w axis0.requested_state 1"); delay(100); // IDLE
+    odriveRear.println("w axis0.controller.config.control_mode 2"); delay(100); // VELOCITY_CONTROL
+    odriveRear.println("w axis0.controller.config.input_mode 1"); delay(100); // PASSTHROUGH
+    odriveRear.println("w axis0.requested_state 8"); delay(100); // CLOSED_LOOP_CONTROL
+
+    odriveRear.println("c 1"); delay(100); // Clear Axis 1 errors
+    odriveRear.println("w axis1.requested_state 1"); delay(100); // IDLE
+    odriveRear.println("w axis1.controller.config.control_mode 2"); delay(100); // VELOCITY_CONTROL
+    odriveRear.println("w axis1.controller.config.input_mode 1"); delay(100); // PASSTHROUGH
+    odriveRear.println("w axis1.requested_state 8"); delay(100); // CLOSED_LOOP_CONTROL
+}
+
+void pollODrives() {
+    Serial1.print("f 0\n");
+    Serial1.print("f 1\n");
+
+    odriveRear.print("f 1\n");
+    odriveRear.print("f 0\n");
+}
+
 void connectToWiFi() {
     if (WiFi.status() == WL_NO_MODULE) {
         Serial.println("❌ Error: Wi-Fi module not detected on Uno R4!");
@@ -198,16 +319,11 @@ void connectToWiFi() {
     }
 }
 
-/**
- * Polls Supabase Database HTTPS REST API for live commands
- * GET /rest/v1/robot_command?id=eq.1&select=cmd
- */
 void pollSupabaseCloud() {
     if (WiFi.status() != WL_CONNECTED) return;
-    if (String(SUPABASE_HOST).startsWith("your-project")) return; // Skip if default placeholder
+    if (String(SUPABASE_HOST).startsWith("your-project")) return;
 
     if (sslClient.connect(SUPABASE_HOST, SUPABASE_PORT)) {
-        // Build Supabase HTTPS GET request
         sslClient.print("GET /rest/v1/robot_command?id=eq.1&select=cmd HTTP/1.1\r\n");
         sslClient.print("Host: "); sslClient.print(SUPABASE_HOST); sslClient.print("\r\n");
         sslClient.print("apikey: "); sslClient.print(SUPABASE_ANON_KEY); sslClient.print("\r\n");
@@ -224,7 +340,6 @@ void pollSupabaseCloud() {
         }
         sslClient.stop();
 
-        // Parse JSON response: [{"cmd":"w"}]
         int cmdIndex = response.indexOf("\"cmd\":\"");
         if (cmdIndex != -1) {
             char cmdKey = toLowerCase(response.charAt(cmdIndex + 7));
@@ -233,47 +348,6 @@ void pollSupabaseCloud() {
                 executeCommand(cmdKey, "Supabase Cloud");
             }
         }
-    }
-}
-
-/**
- * Central Command Executor
- */
-void executeCommand(char key, const char* source) {
-    if (key == 'w') {
-        isAutoRoamEnabled = false;
-        moveRobotVelocities(0.0f, currentDriveSpeed);
-        Serial.print("⚡ ["); Serial.print(source); Serial.println("] GET /w -> FORWARD");
-    }
-    else if (key == 's') {
-        isAutoRoamEnabled = false;
-        moveRobotVelocities(0.0f, -currentDriveSpeed);
-        Serial.print("⚡ ["); Serial.print(source); Serial.println("] GET /s -> BACKWARD");
-    }
-    else if (key == 'a') {
-        isAutoRoamEnabled = false;
-        moveRobotVelocities(-currentDriveSpeed, 0.0f);
-        Serial.print("⚡ ["); Serial.print(source); Serial.println("] GET /a -> LEFT STRAFE");
-    }
-    else if (key == 'd') {
-        isAutoRoamEnabled = false;
-        moveRobotVelocities(currentDriveSpeed, 0.0f);
-        Serial.print("⚡ ["); Serial.print(source); Serial.println("] GET /d -> RIGHT STRAFE");
-    }
-    else if (key == 'x' || key == 'o' || key == ' ') {
-        isAutoRoamEnabled = false;
-        stopAllMotors();
-        Serial.print("⚡ ["); Serial.print(source); Serial.println("] GET /x -> STOP ALL");
-    }
-    else if (key == 'i') {
-        isAutoRoamEnabled = true;
-        stateStartTime = millis();
-        Serial.print("⚡ ["); Serial.print(source); Serial.println("] GET /i -> AUTO ROAM");
-    }
-    else if (key >= '1' && key <= '9') {
-        currentDriveSpeed = 1.0f + (key - '1') * 0.45f;
-        Serial.print("⚡ ["); Serial.print(source); Serial.print("] Speed Level: ");
-        Serial.println(currentDriveSpeed);
     }
 }
 
@@ -291,7 +365,10 @@ void printStatusHeartbeat() {
     Serial.print(WiFi.status() == WL_CONNECTED ? "CONNECTED" : "DISCONNECTED");
     Serial.print(" | Mode: ");
     Serial.print(isAutoRoamEnabled ? "AUTO" : "MANUAL");
-    Serial.print(" | Encoders: [");
+    Serial.print(" | Target Vx,Vy: [");
+    Serial.print(targetVx, 1); Serial.print(",");
+    Serial.print(targetVy, 1);
+    Serial.print("] | Encoders: [");
     Serial.print(encoderPositions[0], 1); Serial.print(",");
     Serial.print(encoderPositions[1], 1); Serial.print(",");
     Serial.print(encoderPositions[2], 1); Serial.print(",");
@@ -333,64 +410,6 @@ void updateAutoRoamMotion() {
     }
 
     moveRobotVelocities(currentVx, currentVy);
-}
-
-void moveRobotVelocities(float vx, float vy) {
-    float fl =  vy + vx;
-    float fr = -(vy - vx);
-    float rl =  vy - vx;
-    float rr = -(vy + vx);
-
-    Serial1.print("v 0 "); Serial1.println(fl, 2);
-    Serial1.print("v 1 "); Serial1.println(fr, 2);
-
-    odriveRear.print("v 1 "); odriveRear.println(rl, 2);
-    odriveRear.print("v 0 "); odriveRear.println(rr, 2);
-}
-
-void stopAllMotors() {
-    Serial1.println("v 0 0");
-    Serial1.println("v 1 0");
-    odriveRear.println("v 0 0");
-    odriveRear.println("v 1 0");
-    currentVx = 0.0f;
-    currentVy = 0.0f;
-}
-
-void setupODriveFront() {
-    Serial1.println("c 0"); delay(100);
-    Serial1.println("w axis0.requested_state 1"); delay(100);
-    Serial1.println("w axis0.controller.config.control_mode 2"); delay(100);
-    Serial1.println("w axis0.controller.config.input_mode 1"); delay(100);
-    Serial1.println("w axis0.requested_state 8"); delay(100);
-
-    Serial1.println("c 1"); delay(100);
-    Serial1.println("w axis1.requested_state 1"); delay(100);
-    Serial1.println("w axis1.controller.config.control_mode 2"); delay(100);
-    Serial1.println("w axis1.controller.config.input_mode 1"); delay(100);
-    Serial1.println("w axis1.requested_state 8"); delay(100);
-}
-
-void setupODriveRear() {
-    odriveRear.println("c 0"); delay(100);
-    odriveRear.println("w axis0.requested_state 1"); delay(100);
-    odriveRear.println("w axis0.controller.config.control_mode 2"); delay(100);
-    odriveRear.println("w axis0.controller.config.input_mode 1"); delay(100);
-    odriveRear.println("w axis0.requested_state 8"); delay(100);
-
-    odriveRear.println("c 1"); delay(100);
-    odriveRear.println("w axis1.requested_state 1"); delay(100);
-    odriveRear.println("w axis1.controller.config.control_mode 2"); delay(100);
-    odriveRear.println("w axis1.controller.config.input_mode 1"); delay(100);
-    odriveRear.println("w axis1.requested_state 8"); delay(100);
-}
-
-void pollODrives() {
-    Serial1.print("f 0\n");
-    Serial1.print("f 1\n");
-
-    odriveRear.print("f 1\n");
-    odriveRear.print("f 0\n");
 }
 
 void processSerial1() {
