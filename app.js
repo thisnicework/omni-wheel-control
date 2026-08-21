@@ -2,9 +2,9 @@
  * app.js
  * Omni-wheel Robot Controller Engine
  * 
- * Hold-To-Drive Mode:
- *   - Robot drives ONLY while button/key is pressed or held down!
- *   - Releases button or key -> Dispatches instant STOP 'x' command.
+ * Continuous Hold-To-Drive Pulse System (150ms):
+ *   - While button or key is held down, sends heartbeat pulse every 150ms.
+ *   - Releases button or key -> Clears interval & sends instant STOP 'x'.
  */
 
 // ==========================================
@@ -191,7 +191,7 @@ class RobotControlDispatcher {
 
 
 // ==========================================
-// 4. MAIN APPLICATION & HOLD-TO-DRIVE BINDINGS
+// 4. MAIN APPLICATION & CONTINUOUS HOLD PULSE BINDINGS
 // ==========================================
 document.addEventListener('DOMContentLoaded', () => {
     // DOM Elements
@@ -241,31 +241,73 @@ document.addEventListener('DOMContentLoaded', () => {
         });
     }
 
-    // Helper: Hold-To-Drive Binding Function
+    // Active Hold Pulse Timer Storage
+    let holdPulseTimer = null;
+    let currentHoldingCmd = null;
+
+    function startHoldPulse(cmd, element) {
+        if (currentHoldingCmd === cmd) return;
+        currentHoldingCmd = cmd;
+        if (element) element.classList.add('active');
+
+        // Immediate first pulse
+        dispatcher.send(cmd);
+
+        // Continuous 150ms heartbeat pulses while held down
+        if (holdPulseTimer) clearInterval(holdPulseTimer);
+        holdPulseTimer = setInterval(() => {
+            if (currentHoldingCmd) {
+                dispatcher.send(currentHoldingCmd);
+            }
+        }, 150);
+    }
+
+    function stopHoldPulse(element) {
+        currentHoldingCmd = null;
+        if (holdPulseTimer) {
+            clearInterval(holdPulseTimer);
+            holdPulseTimer = null;
+        }
+        if (element) element.classList.remove('active');
+        dispatcher.send('x');
+    }
+
     function bindHoldToDrive(element, moveCmd) {
         if (!element) return;
 
-        const startMove = (e) => {
-            e.preventDefault();
-            element.classList.add('active');
-            dispatcher.send(moveCmd);
-        };
-
-        const stopMove = (e) => {
-            e.preventDefault();
-            element.classList.remove('active');
-            dispatcher.send('x');
-        };
-
         // Mouse Events
-        element.addEventListener('mousedown', startMove);
-        element.addEventListener('mouseup', stopMove);
-        element.addEventListener('mouseleave', stopMove);
+        element.addEventListener('mousedown', (e) => {
+            e.preventDefault();
+            startHoldPulse(moveCmd, element);
+        });
+
+        element.addEventListener('mouseup', (e) => {
+            e.preventDefault();
+            stopHoldPulse(element);
+        });
+
+        element.addEventListener('mouseleave', (e) => {
+            e.preventDefault();
+            if (currentHoldingCmd === moveCmd) {
+                stopHoldPulse(element);
+            }
+        });
 
         // Touch Events (Mobile Touchscreen)
-        element.addEventListener('touchstart', startMove, { passive: false });
-        element.addEventListener('touchend', stopMove, { passive: false });
-        element.addEventListener('touchcancel', stopMove, { passive: false });
+        element.addEventListener('touchstart', (e) => {
+            e.preventDefault();
+            startHoldPulse(moveCmd, element);
+        }, { passive: false });
+
+        element.addEventListener('touchend', (e) => {
+            e.preventDefault();
+            stopHoldPulse(element);
+        }, { passive: false });
+
+        element.addEventListener('touchcancel', (e) => {
+            e.preventDefault();
+            stopHoldPulse(element);
+        }, { passive: false });
     }
 
     // Bind D-Pad Direction Buttons
@@ -278,13 +320,14 @@ document.addEventListener('DOMContentLoaded', () => {
     if (btnStop) {
         btnStop.addEventListener('click', (e) => {
             e.preventDefault();
-            dispatcher.send('x');
+            stopHoldPulse(null);
         });
     }
 
     if (btnAuto) {
         btnAuto.addEventListener('click', (e) => {
             e.preventDefault();
+            stopHoldPulse(null);
             dispatcher.send('i');
         });
     }
@@ -292,6 +335,7 @@ document.addEventListener('DOMContentLoaded', () => {
     if (btnStopAll) {
         btnStopAll.addEventListener('click', (e) => {
             e.preventDefault();
+            stopHoldPulse(null);
             dispatcher.send('o');
         });
     }
@@ -315,13 +359,13 @@ document.addEventListener('DOMContentLoaded', () => {
         if (keyMap[k] && !activeKeys.has(k)) {
             e.preventDefault();
             activeKeys.add(k);
-            if (keyMap[k].btn) keyMap[k].btn.classList.add('active');
-            dispatcher.send(keyMap[k].cmd);
+            startHoldPulse(keyMap[k].cmd, keyMap[k].btn);
         } else if (k === 'x' || k === ' ') {
             e.preventDefault();
-            dispatcher.send('x');
+            stopHoldPulse(null);
         } else if (k === 'i') {
             e.preventDefault();
+            stopHoldPulse(null);
             dispatcher.send('i');
         } else if (k >= '1' && k <= '9') {
             e.preventDefault();
@@ -336,9 +380,8 @@ document.addEventListener('DOMContentLoaded', () => {
             activeKeys.delete(k);
             if (keyMap[k].btn) keyMap[k].btn.classList.remove('active');
             
-            // If all direction keys released, stop robot!
             if (activeKeys.size === 0) {
-                dispatcher.send('x');
+                stopHoldPulse(keyMap[k].btn);
             }
         }
     });
