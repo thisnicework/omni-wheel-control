@@ -2,12 +2,11 @@
  * arduino_odrive_relay.ino
  * 
  * Target MCU: Arduino Uno R4 WiFi
- * Purpose: Dual ODrive v3.6 Relay with 40A Maximum Beast Torque & 50 RPS Velocity Limits.
+ * Purpose: Dual ODrive v3.6 Relay with Clean Non-Interrupting State 8 Control.
  * 
- * Maximum Torque Safeguards:
- *   - Enforces 40.0A Maximum Current Limit (current_lim = 40.0A) across all 4 motor axes.
- *   - Expands Velocity Limit to 50.0 RPS (vel_limit = 50.0) so torque headroom is 100% unrestricted.
- *   - Speed Levels 1..9 scale up to 28.0 RPS (1680 RPM) for extreme pushing power.
+ * Fix for ODrive Error Tripping:
+ *   - Removed 'c 0' / 'c 1' encoder calibration commands from setup & rearm routines.
+ *   - Prevents calibration sequence from being aborted and tripping ODrive into State 0.
  *   - Supports Mac Local Relay Server (192.168.10.140:8000), Cloud MQTT, & USB Serial.
  */
 
@@ -62,7 +61,7 @@ unsigned long lastMoveCommandMs = 0;
 // System Motion State
 bool isAutoRoamEnabled = false;
 bool isArmed = false;
-float currentDriveSpeed = 10.0f; // Velocity turns/sec (Default 10.0 rps = 600 RPM for maximum torque)
+float currentDriveSpeed = 6.0f; // Velocity turns/sec (Default 6.0 rps = 360 RPM for high torque)
 
 // Continuous Target & Current Velocities (Vx, Vy)
 float targetVx = 0.0f;
@@ -135,7 +134,7 @@ void setup() {
     delay(1000);
 
     Serial.println("\n==================================================");
-    Serial.println("  🤖 Arduino Uno R4 WiFi - 40A BEAST TORQUE DRIVE ");
+    Serial.println("  🤖 Arduino Uno R4 WiFi - Clean State 8 Engine  ");
     Serial.println("==================================================");
 
     // Initialize ODrives into Closed Loop Velocity Control once at boot
@@ -314,21 +313,17 @@ void queryODriveStatus() {
 }
 
 /**
- * Re-arms ODrive motors with 40A Current Limit & State 8 Enforced
+ * Re-arms ODrive motors ONLY if transitioning from stopped state
  */
 void rearmODrivesIfNeeded() {
     if (!isArmed) {
         Serial1.println("w axis0.error 0");
         Serial1.println("w axis1.error 0");
-        Serial1.println("w axis0.motor.config.current_lim 40.0");
-        Serial1.println("w axis1.motor.config.current_lim 40.0");
         Serial1.println("w axis0.requested_state 8");
         Serial1.println("w axis1.requested_state 8");
 
         odriveRear.println("w axis0.error 0");
         odriveRear.println("w axis1.error 0");
-        odriveRear.println("w axis0.motor.config.current_lim 40.0");
-        odriveRear.println("w axis1.motor.config.current_lim 40.0");
         odriveRear.println("w axis0.requested_state 8");
         odriveRear.println("w axis1.requested_state 8");
         isArmed = true;
@@ -347,7 +342,7 @@ void executeCommand(char key, const char* source) {
         targetVy = currentDriveSpeed;
         currentVx = targetVx;
         currentVy = targetVy;
-        moveRobotVelocities(currentVx, currentVy); // INSTANT DIRECT UART OUTPUT!
+        moveRobotVelocities(currentVx, currentVy);
 
         if (lastExecutedKey != 'w') {
             lastExecutedKey = 'w';
@@ -363,7 +358,7 @@ void executeCommand(char key, const char* source) {
         targetVy = -currentDriveSpeed;
         currentVx = targetVx;
         currentVy = targetVy;
-        moveRobotVelocities(currentVx, currentVy); // INSTANT DIRECT UART OUTPUT!
+        moveRobotVelocities(currentVx, currentVy);
 
         if (lastExecutedKey != 's') {
             lastExecutedKey = 's';
@@ -379,7 +374,7 @@ void executeCommand(char key, const char* source) {
         targetVy = 0.0f;
         currentVx = targetVx;
         currentVy = targetVy;
-        moveRobotVelocities(currentVx, currentVy); // INSTANT DIRECT UART OUTPUT!
+        moveRobotVelocities(currentVx, currentVy);
 
         if (lastExecutedKey != 'a') {
             lastExecutedKey = 'a';
@@ -395,7 +390,7 @@ void executeCommand(char key, const char* source) {
         targetVy = 0.0f;
         currentVx = targetVx;
         currentVy = targetVy;
-        moveRobotVelocities(currentVx, currentVy); // INSTANT DIRECT UART OUTPUT!
+        moveRobotVelocities(currentVx, currentVy);
 
         if (lastExecutedKey != 'd') {
             lastExecutedKey = 'd';
@@ -421,7 +416,7 @@ void executeCommand(char key, const char* source) {
         Serial.print("🤖 ["); Serial.print(source); Serial.println(" Received] Cmd: AUTO ROAM [I]");
     }
     else if (key >= '1' && key <= '9') {
-        currentDriveSpeed = 4.0f + (key - '1') * 3.0f; // Scale 4.0 ~ 28.0 RPS!
+        currentDriveSpeed = 2.0f + (key - '1') * 2.0f;
         Serial.print("⚙️ ["); Serial.print(source); Serial.print(" Received] Speed Set To: ");
         Serial.print(currentDriveSpeed); Serial.println(" turns/s");
     }
@@ -460,49 +455,33 @@ void stopAllMotors() {
 }
 
 void setupODriveFront() {
-    Serial1.println("w axis0.error 0"); delay(20);
-    Serial1.println("w axis1.error 0"); delay(20);
-    Serial1.println("c 0"); delay(20);
-    Serial1.println("c 1"); delay(20);
+    Serial1.println("w axis0.error 0"); delay(30);
+    Serial1.println("w axis1.error 0"); delay(30);
 
-    // Boost motor current limit to 40A and velocity limit to 50 RPS for MAXIMUM TORQUE!
-    Serial1.println("w axis0.motor.config.current_lim 40.0"); delay(20);
-    Serial1.println("w axis1.motor.config.current_lim 40.0"); delay(20);
-    Serial1.println("w axis0.controller.config.vel_limit 50.0"); delay(20);
-    Serial1.println("w axis1.controller.config.vel_limit 50.0"); delay(20);
+    Serial1.println("w axis0.requested_state 1"); delay(30);
+    Serial1.println("w axis0.controller.config.control_mode 2"); delay(30);
+    Serial1.println("w axis0.controller.config.input_mode 1"); delay(30);
+    Serial1.println("w axis0.requested_state 8"); delay(30);
 
-    Serial1.println("w axis0.requested_state 1"); delay(20);
-    Serial1.println("w axis0.controller.config.control_mode 2"); delay(20);
-    Serial1.println("w axis0.controller.config.input_mode 1"); delay(20);
-    Serial1.println("w axis0.requested_state 8"); delay(20);
-
-    Serial1.println("w axis1.requested_state 1"); delay(20);
-    Serial1.println("w axis1.controller.config.control_mode 2"); delay(20);
-    Serial1.println("w axis1.controller.config.input_mode 1"); delay(20);
-    Serial1.println("w axis1.requested_state 8"); delay(20);
+    Serial1.println("w axis1.requested_state 1"); delay(30);
+    Serial1.println("w axis1.controller.config.control_mode 2"); delay(30);
+    Serial1.println("w axis1.controller.config.input_mode 1"); delay(30);
+    Serial1.println("w axis1.requested_state 8"); delay(30);
 }
 
 void setupODriveRear() {
-    odriveRear.println("w axis0.error 0"); delay(20);
-    odriveRear.println("w axis1.error 0"); delay(20);
-    odriveRear.println("c 0"); delay(20);
-    odriveRear.println("c 1"); delay(20);
+    odriveRear.println("w axis0.error 0"); delay(30);
+    odriveRear.println("w axis1.error 0"); delay(30);
 
-    // Boost motor current limit to 40A and velocity limit to 50 RPS for MAXIMUM TORQUE!
-    odriveRear.println("w axis0.motor.config.current_lim 40.0"); delay(20);
-    odriveRear.println("w axis1.motor.config.current_lim 40.0"); delay(20);
-    odriveRear.println("w axis0.controller.config.vel_limit 50.0"); delay(20);
-    odriveRear.println("w axis1.controller.config.vel_limit 50.0"); delay(20);
+    odriveRear.println("w axis0.requested_state 1"); delay(30);
+    odriveRear.println("w axis0.controller.config.control_mode 2"); delay(30);
+    odriveRear.println("w axis0.controller.config.input_mode 1"); delay(30);
+    odriveRear.println("w axis0.requested_state 8"); delay(30);
 
-    odriveRear.println("w axis0.requested_state 1"); delay(20);
-    odriveRear.println("w axis0.controller.config.control_mode 2"); delay(20);
-    odriveRear.println("w axis0.controller.config.input_mode 1"); delay(20);
-    odriveRear.println("w axis0.requested_state 8"); delay(20);
-
-    odriveRear.println("w axis1.requested_state 1"); delay(20);
-    odriveRear.println("w axis1.controller.config.control_mode 2"); delay(20);
-    odriveRear.println("w axis1.controller.config.input_mode 1"); delay(20);
-    odriveRear.println("w axis1.requested_state 8"); delay(20);
+    odriveRear.println("w axis1.requested_state 1"); delay(30);
+    odriveRear.println("w axis1.controller.config.control_mode 2"); delay(30);
+    odriveRear.println("w axis1.controller.config.input_mode 1"); delay(30);
+    odriveRear.println("w axis1.requested_state 8"); delay(30);
 }
 
 void handleWebControlInput() {
