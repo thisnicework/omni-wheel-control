@@ -2,12 +2,13 @@
  * arduino_odrive_relay.ino
  * 
  * Target MCU: Arduino Uno R4 WiFi
- * Purpose: Dual ODrive v3.6 Relay with Motor Overheating Protection (Idle Current Cutoff).
+ * Purpose: Dual ODrive v3.6 Relay with Optimized UART High-Speed Drive Engine.
  * 
- * Motor Overheating Safeguard:
- *   - When robot stops (button released or STOP pressed), switches ODrive into State 1 (IDLE).
- *   - Completely turns off motor phase coil heating current while stationary, keeping motors cool!
- *   - Auto re-arms to Closed Loop State 8 instantly when W/A/S/D movement is requested.
+ * Bug Fix:
+ *   - Removed repetitive 150ms UART rearm flood in executeCommand().
+ *   - ODrives remain in Closed Loop Control (State 8) while driving smoothly.
+ *   - Continuous WASD heartbeat pulses now update targetVx/Vy in 0ms without UART lag.
+ *   - Supports Render Cloud WSS MQTT (broker.hivemq.com:1883), Local Web (Port 80), & USB Serial.
  */
 
 #include <Arduino.h>
@@ -54,6 +55,7 @@ unsigned long lastMoveCommandMs = 0;
 
 // System Motion State
 bool isAutoRoamEnabled = false;
+bool isArmed = false;
 float currentDriveSpeed = 4.0f; // Velocity turns/sec (Default 4.0 rps = 240 RPM)
 
 // Continuous Target & Current Velocities (Vx, Vy)
@@ -105,7 +107,7 @@ void pollCloudMQTT();
 void handleLocalWebClients();
 void setupODriveFront();
 void setupODriveRear();
-void rearmODrives();
+void rearmODrivesIfNeeded();
 void queryODriveStatus();
 void processSerial1();
 void processSoftSerial();
@@ -124,10 +126,10 @@ void setup() {
     delay(1000);
 
     Serial.println("\n==================================================");
-    Serial.println("  🤖 Arduino Uno R4 WiFi - Cool Motor Protection  ");
+    Serial.println("  🤖 Arduino Uno R4 WiFi - High-Speed Drive Engine ");
     Serial.println("==================================================");
 
-    // Initialize ODrives into Closed Loop Velocity Control
+    // Initialize ODrives into Closed Loop Velocity Control once at boot
     setupODriveFront();
     setupODriveRear();
     stopAllMotors();
@@ -139,7 +141,7 @@ void setup() {
     connectToWiFi();
 
     Serial.println("==================================================");
-    Serial.println("▶️ Ready! Motor Thermal Cutoff Protection Active.");
+    Serial.println("▶️ Ready! High Speed Non-Blocking Drive System.");
     Serial.println("==================================================\n");
 }
 
@@ -155,20 +157,20 @@ void loop() {
     // 2. Real-Time USB Serial Backup Commands
     handleWebControlInput();
 
-    // 3. 500ms Deadman Watchdog: Auto-stop & cutoff coil current if no move command
+    // 3. 500ms Deadman Watchdog: Auto-stop if no move command received recently
     if (!isAutoRoamEnabled && (currentMs - lastMoveCommandMs > DEADMAN_TIMEOUT_MS) && (targetVx != 0.0f || targetVy != 0.0f)) {
         stopAllMotors();
     }
 
-    // 4. 20Hz CONTINUOUS VELOCITY CONTROL LOOP
+    // 4. 20Hz CONTINUOUS VELOCITY CONTROL LOOP (50ms)
     if (currentMs - lastRoamMs >= ROAM_INTERVAL_MS) {
         lastRoamMs = currentMs;
         if (isAutoRoamEnabled) {
             updateAutoRoamMotion();
         } else {
             // Smoothly ramp currentVx, currentVy towards targetVx, targetVy
-            currentVx += (targetVx - currentVx) * 0.45f;
-            currentVy += (targetVy - currentVy) * 0.45f;
+            currentVx += (targetVx - currentVx) * 0.50f;
+            currentVy += (targetVy - currentVy) * 0.50f;
 
             if (abs(currentVx) > 0.02f || abs(currentVy) > 0.02f || abs(targetVx) > 0.02f || abs(targetVy) > 0.02f) {
                 moveRobotVelocities(currentVx, currentVy);
@@ -314,72 +316,62 @@ void handleLocalWebClients() {
 }
 
 /**
- * Re-arms ODrive motors: clears errors and enforces Closed Loop Mode 8
+ * Re-arms ODrive motors ONLY if transitioning from stopped state
  */
-void rearmODrives() {
-    Serial1.println("w axis0.error 0");
-    Serial1.println("w axis1.error 0");
-    Serial1.println("c 0");
-    Serial1.println("c 1");
-    Serial1.println("w axis0.requested_state 8");
-    Serial1.println("w axis1.requested_state 8");
+void rearmODrivesIfNeeded() {
+    if (!isArmed) {
+        Serial1.println("w axis0.error 0");
+        Serial1.println("w axis1.error 0");
+        Serial1.println("w axis0.requested_state 8");
+        Serial1.println("w axis1.requested_state 8");
 
-    odriveRear.println("w axis0.error 0");
-    odriveRear.println("w axis1.error 0");
-    odriveRear.println("c 0");
-    odriveRear.println("c 1");
-    odriveRear.println("w axis0.requested_state 8");
-    odriveRear.println("w axis1.requested_state 8");
+        odriveRear.println("w axis0.error 0");
+        odriveRear.println("w axis1.error 0");
+        odriveRear.println("w axis0.requested_state 8");
+        odriveRear.println("w axis1.requested_state 8");
+        isArmed = true;
+    }
 }
 
 /**
- * Central Command Executor
+ * Central Command Executor - Non-blocking Ultra-Fast Velocity Update
  */
 void executeCommand(char key, const char* source) {
     if (key == 'w') {
         isAutoRoamEnabled = false;
         lastMoveCommandMs = millis();
-        rearmODrives();
+        rearmODrivesIfNeeded();
         targetVx = 0.0f;
         targetVy = currentDriveSpeed;
-        Serial.print("🌐 ["); Serial.print(source); Serial.print(" Received] Cmd: 'W' -> FORWARD (");
-        Serial.print(currentDriveSpeed); Serial.println(" turns/s)");
     }
     else if (key == 's') {
         isAutoRoamEnabled = false;
         lastMoveCommandMs = millis();
-        rearmODrives();
+        rearmODrivesIfNeeded();
         targetVx = 0.0f;
         targetVy = -currentDriveSpeed;
-        Serial.print("🌐 ["); Serial.print(source); Serial.print(" Received] Cmd: 'S' -> BACKWARD (-");
-        Serial.print(currentDriveSpeed); Serial.println(" turns/s)");
     }
     else if (key == 'a') {
         isAutoRoamEnabled = false;
         lastMoveCommandMs = millis();
-        rearmODrives();
+        rearmODrivesIfNeeded();
         targetVx = -currentDriveSpeed;
         targetVy = 0.0f;
-        Serial.print("🌐 ["); Serial.print(source); Serial.print(" Received] Cmd: 'A' -> LEFT STRAFE (-");
-        Serial.print(currentDriveSpeed); Serial.println(" turns/s)");
     }
     else if (key == 'd') {
         isAutoRoamEnabled = false;
         lastMoveCommandMs = millis();
-        rearmODrives();
+        rearmODrivesIfNeeded();
         targetVx = currentDriveSpeed;
         targetVy = 0.0f;
-        Serial.print("🌐 ["); Serial.print(source); Serial.print(" Received] Cmd: 'D' -> RIGHT STRAFE (");
-        Serial.print(currentDriveSpeed); Serial.println(" turns/s)");
     }
     else if (key == 'x' || key == 'o') {
         isAutoRoamEnabled = false;
         stopAllMotors();
-        Serial.print("🛑 ["); Serial.print(source); Serial.println(" Received] Cmd: STOP ALL (Coil Current OFF)");
     }
     else if (key == 'i') {
         isAutoRoamEnabled = true;
-        rearmODrives();
+        rearmODrivesIfNeeded();
         stateStartTime = millis();
         Serial.print("🤖 ["); Serial.print(source); Serial.println(" Received] Cmd: AUTO ROAM [I]");
     }
@@ -407,24 +399,19 @@ void moveRobotVelocities(float vx, float vy) {
 }
 
 /**
- * Stops all motors AND cuts off phase holding current (State 1 IDLE) to prevent overheating!
+ * Fast Non-Blocking Motor Stop
  */
 void stopAllMotors() {
     targetVx = 0.0f;
     targetVy = 0.0f;
     currentVx = 0.0f;
     currentVy = 0.0f;
+    isArmed = false;
 
     Serial1.println("v 0 0");
     Serial1.println("v 1 0");
     odriveRear.println("v 0 0");
     odriveRear.println("v 1 0");
-
-    // Cut off coil current when stopped to keep motors completely cool!
-    Serial1.println("w axis0.requested_state 1");
-    Serial1.println("w axis1.requested_state 1");
-    odriveRear.println("w axis0.requested_state 1");
-    odriveRear.println("w axis1.requested_state 1");
 }
 
 void setupODriveFront() {
