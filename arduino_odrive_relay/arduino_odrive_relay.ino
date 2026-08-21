@@ -2,13 +2,12 @@
  * arduino_odrive_relay.ino
  * 
  * Target MCU: Arduino Uno R4 WiFi
- * Purpose: Dual ODrive v3.6 Relay with 500ms Deadman's Switch Safety Watchdog & Cyberpunk UI.
+ * Purpose: Dual ODrive v3.6 Relay with Motor Overheating Protection (Idle Current Cutoff).
  * 
- * Hold-to-Drive Safety System:
- *   - Robot drives ONLY while 'W','A','S','D' buttons are held down.
- *   - 500ms Deadman Watchdog: If no move command is re-sent within 500ms, automatically ramps target velocity to 0.
- *   - Embedded Cyberpunk UI: http://192.168.10.156/ renders Hold-To-Drive touch buttons.
- *   - Supports Render Cloud WSS MQTT (broker.hivemq.com:1883), Local Web (Port 80), & USB Serial.
+ * Motor Overheating Safeguard:
+ *   - When robot stops (button released or STOP pressed), switches ODrive into State 1 (IDLE).
+ *   - Completely turns off motor phase coil heating current while stationary, keeping motors cool!
+ *   - Auto re-arms to Closed Loop State 8 instantly when W/A/S/D movement is requested.
  */
 
 #include <Arduino.h>
@@ -125,7 +124,7 @@ void setup() {
     delay(1000);
 
     Serial.println("\n==================================================");
-    Serial.println("  🤖 Arduino Uno R4 WiFi - Hold-to-Drive System  ");
+    Serial.println("  🤖 Arduino Uno R4 WiFi - Cool Motor Protection  ");
     Serial.println("==================================================");
 
     // Initialize ODrives into Closed Loop Velocity Control
@@ -140,7 +139,7 @@ void setup() {
     connectToWiFi();
 
     Serial.println("==================================================");
-    Serial.println("▶️ Ready! Hold-To-Drive Mode (500ms Safety Watchdog).");
+    Serial.println("▶️ Ready! Motor Thermal Cutoff Protection Active.");
     Serial.println("==================================================\n");
 }
 
@@ -156,10 +155,9 @@ void loop() {
     // 2. Real-Time USB Serial Backup Commands
     handleWebControlInput();
 
-    // 3. 500ms Deadman Watchdog: Auto-stop if no move command received recently
+    // 3. 500ms Deadman Watchdog: Auto-stop & cutoff coil current if no move command
     if (!isAutoRoamEnabled && (currentMs - lastMoveCommandMs > DEADMAN_TIMEOUT_MS) && (targetVx != 0.0f || targetVy != 0.0f)) {
-        targetVx = 0.0f;
-        targetVy = 0.0f;
+        stopAllMotors();
     }
 
     // 4. 20Hz CONTINUOUS VELOCITY CONTROL LOOP
@@ -335,7 +333,7 @@ void rearmODrives() {
 }
 
 /**
- * Central Command Executor - Hold-To-Drive Timer Tracking
+ * Central Command Executor
  */
 void executeCommand(char key, const char* source) {
     if (key == 'w') {
@@ -376,10 +374,8 @@ void executeCommand(char key, const char* source) {
     }
     else if (key == 'x' || key == 'o') {
         isAutoRoamEnabled = false;
-        targetVx = 0.0f;
-        targetVy = 0.0f;
         stopAllMotors();
-        Serial.print("🛑 ["); Serial.print(source); Serial.println(" Received] Cmd: STOP ALL");
+        Serial.print("🛑 ["); Serial.print(source); Serial.println(" Received] Cmd: STOP ALL (Coil Current OFF)");
     }
     else if (key == 'i') {
         isAutoRoamEnabled = true;
@@ -410,6 +406,9 @@ void moveRobotVelocities(float vx, float vy) {
     odriveRear.print("v 0 "); odriveRear.println(rr, 2);
 }
 
+/**
+ * Stops all motors AND cuts off phase holding current (State 1 IDLE) to prevent overheating!
+ */
 void stopAllMotors() {
     targetVx = 0.0f;
     targetVy = 0.0f;
@@ -420,6 +419,12 @@ void stopAllMotors() {
     Serial1.println("v 1 0");
     odriveRear.println("v 0 0");
     odriveRear.println("v 1 0");
+
+    // Cut off coil current when stopped to keep motors completely cool!
+    Serial1.println("w axis0.requested_state 1");
+    Serial1.println("w axis1.requested_state 1");
+    odriveRear.println("w axis0.requested_state 1");
+    odriveRear.println("w axis1.requested_state 1");
 }
 
 void setupODriveFront() {
