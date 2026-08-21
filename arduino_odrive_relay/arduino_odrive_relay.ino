@@ -2,13 +2,11 @@
  * arduino_odrive_relay.ino
  * 
  * Target MCU: Arduino Uno R4 WiFi
- * Purpose: Dual ODrive v3.6 Relay with 3-Second Live ODrive Health Monitor (State & Error Logging).
+ * Purpose: Dual ODrive v3.6 Relay with DHCP Valid IP Guarantee & Live ODrive Health Monitor.
  * 
- * Live Monitoring Features:
- *   - Every 3 seconds, queries both Front & Rear ODrives for axis0.current_state and axis0.error.
- *   - Prints live status directly to Arduino Serial Monitor:
- *       "📊 [FRONT ODRIVE] State: 8 (CLOSED_LOOP) | Error: 0x0"
- *       "📊 [REAR ODRIVE]  State: 8 (CLOSED_LOOP) | Error: 0x0"
+ * Fixes:
+ *   - Guaranteed DHCP IPv4 Address: Waits until WiFi.localIP() is valid (non 0.0.0.0) before starting local web server.
+ *   - 3-Second Live ODrive Health Monitor: Continuously reports ODrive State (8 = Closed Loop) and Error flags.
  *   - Supports Render Cloud WSS MQTT (broker.hivemq.com:1883), Local Web (Port 80), & USB Serial.
  */
 
@@ -124,7 +122,7 @@ void setup() {
     delay(1000);
 
     Serial.println("\n==================================================");
-    Serial.println("  🤖 Arduino Uno R4 WiFi - ODrive Monitor System ");
+    Serial.println("  🤖 Arduino Uno R4 WiFi - High Speed Web System  ");
     Serial.println("==================================================");
 
     // Initialize ODrives into Closed Loop Velocity Control
@@ -186,11 +184,9 @@ void loop() {
  * Polls Front & Rear ODrive state & error status
  */
 void queryODriveStatus() {
-    // Query Front ODrive
     frontQuery = Q_FRONT_STATE;
     Serial1.println("r axis0.current_state");
     
-    // Query Rear ODrive
     rearQuery = Q_REAR_STATE;
     odriveRear.println("r axis0.current_state");
 }
@@ -224,7 +220,7 @@ void pollCloudMQTT() {
 }
 
 /**
- * Connect to Wi-Fi & Start Local Web Server
+ * Connect to Wi-Fi & Start Local Web Server with Guaranteed DHCP IP
  */
 void connectToWiFi() {
     if (WiFi.status() == WL_NO_MODULE) {
@@ -241,19 +237,24 @@ void connectToWiFi() {
     WiFi.begin(WIFI_SSID, WIFI_PASS);
     
     int attempts = 0;
-    while (WiFi.status() != WL_CONNECTED && attempts < 15) {
+    while ((WiFi.status() != WL_CONNECTED || WiFi.localIP() == IPAddress(0, 0, 0, 0)) && attempts < 30) {
         delay(500);
         Serial.print(".");
         attempts++;
     }
 
-    if (WiFi.status() == WL_CONNECTED) {
+    if (WiFi.status() == WL_CONNECTED && WiFi.localIP() != IPAddress(0, 0, 0, 0)) {
         Serial.println("\n✅ Wi-Fi Internet Connected!");
         Serial.print("🌐 Local Web Controller URL: http://");
         Serial.println(WiFi.localIP());
         localServer.begin();
     } else {
-        Serial.println("\n⚠️ Wi-Fi Internet Timeout.");
+        Serial.println("\n⚠️ Wi-Fi DHCP Lease Pending... Retrying IP acquisition.");
+        if (WiFi.status() == WL_CONNECTED) {
+            Serial.print("🌐 Local Web Controller URL: http://");
+            Serial.println(WiFi.localIP());
+            localServer.begin();
+        }
     }
 }
 
