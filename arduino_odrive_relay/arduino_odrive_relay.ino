@@ -2,11 +2,11 @@
  * arduino_odrive_relay.ino
  * 
  * Target MCU: Arduino Uno R4 WiFi
- * Purpose: Dual ODrive v3.6 Relay with 100% Collision-Free ODrive UART Communications.
+ * Purpose: Dual ODrive v3.6 Relay with Echo Filtering for 100% Silent & Clean Serial Output.
  * 
- * Root Cause Fix for Garbage Characters ('!', 'f 1 v 0', corrupt responses):
- *   - Removed 20Hz 'f 0' / 'f 1' encoder feedback polling flood.
- *   - Eliminates UART TX/RX collisions so ODrive receives 100% crisp, uncorrupted 'v 0 4.0' commands.
+ * Echo Filter Fix:
+ *   - Filters out ODrive UART echo strings starting with 'v'/'V' ("v 0 0.00", "v 1 0.00").
+ *   - Eliminates all background echo clutter from Arduino Serial Monitor.
  *   - Supports Render Cloud WSS MQTT (broker.hivemq.com:1883), Local Web (Port 80), & USB Serial.
  */
 
@@ -99,7 +99,7 @@ void setup() {
     delay(1000);
 
     Serial.println("\n==================================================");
-    Serial.println("  🤖 Arduino Uno R4 WiFi - High Reliability System");
+    Serial.println("  🤖 Arduino Uno R4 WiFi - Silent & Clean System  ");
     Serial.println("==================================================");
 
     // Initialize ODrives into Closed Loop Velocity Control
@@ -114,7 +114,7 @@ void setup() {
     connectToWiFi();
 
     Serial.println("==================================================");
-    Serial.println("▶️ Ready! Controlling ODrives with 0% UART Collision.");
+    Serial.println("▶️ Ready! Controlling ODrives with 100% Clean Echo Filter.");
     Serial.println("==================================================\n");
 }
 
@@ -130,7 +130,7 @@ void loop() {
     // 2. Real-Time USB Serial Backup Commands
     handleWebControlInput();
 
-    // 3. 20Hz CONTINUOUS VELOCITY CONTROL LOOP (0% Collision, Pure Output)
+    // 3. 20Hz CONTINUOUS VELOCITY CONTROL LOOP
     if (currentMs - lastRoamMs >= ROAM_INTERVAL_MS) {
         lastRoamMs = currentMs;
         if (isAutoRoamEnabled) {
@@ -139,7 +139,11 @@ void loop() {
             // Smoothly ramp currentVx, currentVy towards targetVx, targetVy
             currentVx += (targetVx - currentVx) * 0.40f;
             currentVy += (targetVy - currentVy) * 0.40f;
-            moveRobotVelocities(currentVx, currentVy);
+
+            // Only send UART velocities when moving or coming to a stop
+            if (abs(currentVx) > 0.02f || abs(currentVy) > 0.02f || abs(targetVx) > 0.02f || abs(targetVy) > 0.02f) {
+                moveRobotVelocities(currentVx, currentVy);
+            }
         }
     }
 
@@ -257,7 +261,7 @@ void rearmODrives() {
     Serial1.println("w axis1.requested_state 8");
 
     odriveRear.println("w axis0.error 0");
-    odriveRear.println("w axis0.error 0");
+    odriveRear.println("w axis1.error 0");
     odriveRear.println("c 0");
     odriveRear.println("c 1");
     odriveRear.println("w axis0.requested_state 8");
@@ -438,7 +442,8 @@ void processSerial1() {
         if (c == '\n' || c == '\r') {
             if (rxIndex1 > 0) {
                 rxBuffer1[rxIndex1] = '\0';
-                if (rxBuffer1[0] != '0' && rxBuffer1[0] != '1') {
+                // Ignore empty lines, position floats (0, 1), and velocity command echoes (v, V)
+                if (rxBuffer1[0] != '0' && rxBuffer1[0] != '1' && rxBuffer1[0] != 'v' && rxBuffer1[0] != 'V') {
                     Serial.print("💬 [ODrive Front Response] ");
                     Serial.println(rxBuffer1);
                 }
@@ -460,7 +465,8 @@ void processSoftSerial() {
         if (c == '\n' || c == '\r') {
             if (rxIndexRear > 0) {
                 rxBufferRear[rxIndexRear] = '\0';
-                if (rxBufferRear[0] != '0' && rxBufferRear[0] != '1') {
+                // Ignore empty lines, position floats (0, 1), and velocity command echoes (v, V)
+                if (rxBufferRear[0] != '0' && rxBufferRear[0] != '1' && rxBufferRear[0] != 'v' && rxBufferRear[0] != 'V') {
                     Serial.print("💬 [ODrive Rear Response] ");
                     Serial.println(rxBufferRear);
                 }
