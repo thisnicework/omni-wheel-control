@@ -2,13 +2,11 @@
  * arduino_odrive_relay.ino
  * 
  * Target MCU: Arduino Uno R4 WiFi
- * Purpose: Dual ODrive v3.6 Relay with Auto-Recovery, Non-Blocking USB & High Speed Wi-Fi.
+ * Purpose: Dual ODrive v3.6 Relay with Clean Web Command Logging on USB Serial Monitor.
  * 
- * Fixes for "Intermittent / Stops Working" (되다 안돼):
- *   1. Non-blocking USB Serial (Serial.availableForWrite() check) prevents MCU freezes when USB buffer is full.
- *   2. Auto-Recovery & Re-Arm: Clears ODrive axis errors ("c 0") and enforces State 8 (Closed Loop) on every movement command.
- *   3. Zero-delay Wi-Fi Web Server: 0ms non-blocking socket handling.
- *   4. Smooth 20Hz continuous velocity stream to all 4 motors.
+ * Serial Output:
+ *   - Only displays incoming Web and USB control commands!
+ *   - Disabled telemetry CSV line flooding and background heartbeats for 100% clean terminal output.
  */
 
 #include <Arduino.h>
@@ -35,10 +33,6 @@ unsigned long lastPollMicros = 0;
 // 20Hz Continuous Velocity Update Loop (50ms)
 const unsigned long ROAM_INTERVAL_MS = 50;
 unsigned long lastRoamMs = 0;
-
-// 5-Second Status Heartbeat
-const unsigned long STATUS_INTERVAL_MS = 5000;
-unsigned long lastStatusMs = 0;
 
 // Encoder storage array: [Enc0 (FL), Enc1 (FR), Enc2 (RL), Enc3 (RR)]
 float encoderPositions[4] = {0.0f, 0.0f, 0.0f, 0.0f};
@@ -80,7 +74,6 @@ uint8_t axisQueryRear = 0;
 // Function Prototypes
 void connectToWiFi();
 void handleLocalWebClients();
-void printStatusHeartbeat();
 void setupODriveFront();
 void setupODriveRear();
 void rearmODrives();
@@ -89,7 +82,6 @@ void processSerial1();
 void processSoftSerial();
 void parseFrontLine(const char* line);
 void parseRearLine(const char* line);
-void sendCSVToMac();
 void handleWebControlInput();
 void executeCommand(char key, const char* source);
 void updateAutoRoamMotion();
@@ -105,7 +97,7 @@ void setup() {
     delay(1000);
 
     Serial.println("\n==================================================");
-    Serial.println("  🤖 Arduino Uno R4 WiFi - High Reliability System");
+    Serial.println("  🌐 Arduino Uno R4 WiFi - Web Remote Controller  ");
     Serial.println("==================================================");
 
     // Initialize ODrives into Closed Loop Velocity Control
@@ -120,7 +112,7 @@ void setup() {
     connectToWiFi();
 
     Serial.println("==================================================");
-    Serial.println("▶️ Ready! Send commands via WASD, Local Web, or USB.");
+    Serial.println("▶️ Listening for Web Commands... (Clean Output Mode)");
     Serial.println("==================================================\n");
 }
 
@@ -140,7 +132,6 @@ void loop() {
     if (currentMicros - lastPollMicros >= POLLING_INTERVAL_US) {
         lastPollMicros = currentMicros;
         pollODrives();
-        sendCSVToMac();
     }
 
     // 4. 20Hz CONTINUOUS VELOCITY CONTROL LOOP
@@ -156,13 +147,7 @@ void loop() {
         }
     }
 
-    // 5. 5-Second Status Heartbeat
-    if (currentMs - lastStatusMs >= STATUS_INTERVAL_MS) {
-        lastStatusMs = currentMs;
-        printStatusHeartbeat();
-    }
-
-    // 6. Asynchronously read incoming ODrive response lines
+    // 5. Asynchronously read incoming ODrive response lines
     processSerial1();
     processSoftSerial();
 }
@@ -251,15 +236,15 @@ void rearmODrives() {
 }
 
 /**
- * Central Command Executor
+ * Central Command Executor - Displays ONLY Web & USB Received Commands!
  */
 void executeCommand(char key, const char* source) {
     if (key == 'w') {
         isAutoRoamEnabled = false;
-        rearmODrives(); // Ensure ODrives are cleared of errors and armed
+        rearmODrives();
         targetVx = 0.0f;
         targetVy = currentDriveSpeed;
-        Serial.print("⚡ ["); Serial.print(source); Serial.print("] Cmd 'W' -> FORWARD (");
+        Serial.print("🌐 ["); Serial.print(source); Serial.print(" Received] Cmd: 'W' -> FORWARD (");
         Serial.print(currentDriveSpeed); Serial.println(" turns/s)");
     }
     else if (key == 's') {
@@ -267,7 +252,7 @@ void executeCommand(char key, const char* source) {
         rearmODrives();
         targetVx = 0.0f;
         targetVy = -currentDriveSpeed;
-        Serial.print("⚡ ["); Serial.print(source); Serial.print("] Cmd 'S' -> BACKWARD (-");
+        Serial.print("🌐 ["); Serial.print(source); Serial.print(" Received] Cmd: 'S' -> BACKWARD (-");
         Serial.print(currentDriveSpeed); Serial.println(" turns/s)");
     }
     else if (key == 'a') {
@@ -275,7 +260,7 @@ void executeCommand(char key, const char* source) {
         rearmODrives();
         targetVx = -currentDriveSpeed;
         targetVy = 0.0f;
-        Serial.print("⚡ ["); Serial.print(source); Serial.print("] Cmd 'A' -> LEFT STRAFE (-");
+        Serial.print("🌐 ["); Serial.print(source); Serial.print(" Received] Cmd: 'A' -> LEFT STRAFE (-");
         Serial.print(currentDriveSpeed); Serial.println(" turns/s)");
     }
     else if (key == 'd') {
@@ -283,7 +268,7 @@ void executeCommand(char key, const char* source) {
         rearmODrives();
         targetVx = currentDriveSpeed;
         targetVy = 0.0f;
-        Serial.print("⚡ ["); Serial.print(source); Serial.print("] Cmd 'D' -> RIGHT STRAFE (");
+        Serial.print("🌐 ["); Serial.print(source); Serial.print(" Received] Cmd: 'D' -> RIGHT STRAFE (");
         Serial.print(currentDriveSpeed); Serial.println(" turns/s)");
     }
     else if (key == 'x' || key == 'o' || key == ' ') {
@@ -291,17 +276,17 @@ void executeCommand(char key, const char* source) {
         targetVx = 0.0f;
         targetVy = 0.0f;
         stopAllMotors();
-        Serial.print("⚡ ["); Serial.print(source); Serial.println("] Cmd STOP -> STOP ALL");
+        Serial.print("🛑 ["); Serial.print(source); Serial.println(" Received] Cmd: STOP ALL");
     }
     else if (key == 'i') {
         isAutoRoamEnabled = true;
         rearmODrives();
         stateStartTime = millis();
-        Serial.print("⚡ ["); Serial.print(source); Serial.println("] Cmd 'I' -> AUTO ROAM");
+        Serial.print("🤖 ["); Serial.print(source); Serial.println(" Received] Cmd: AUTO ROAM [I]");
     }
     else if (key >= '1' && key <= '9') {
         currentDriveSpeed = 1.0f + (key - '1') * 0.45f;
-        Serial.print("⚡ ["); Serial.print(source); Serial.print("] Speed Level Set: ");
+        Serial.print("⚙️ ["); Serial.print(source); Serial.print(" Received] Speed Set To: ");
         Serial.println(currentDriveSpeed);
     }
 }
@@ -374,26 +359,6 @@ void handleWebControlInput() {
     while (Serial.available() > 0) {
         char key = toLowerCase((char)Serial.read());
         executeCommand(key, "USB Serial");
-    }
-}
-
-void printStatusHeartbeat() {
-    if (Serial.availableForWrite() > 30) {
-        Serial.print("💬 [HEARTBEAT ");
-        Serial.print(millis() / 1000);
-        Serial.print("s] Wi-Fi Server: http://");
-        Serial.print(WiFi.localIP());
-        Serial.print(" | Mode: ");
-        Serial.print(isAutoRoamEnabled ? "AUTO" : "MANUAL");
-        Serial.print(" | Target Vx,Vy: [");
-        Serial.print(targetVx, 1); Serial.print(",");
-        Serial.print(targetVy, 1);
-        Serial.print("] | Encoders: [");
-        Serial.print(encoderPositions[0], 1); Serial.print(",");
-        Serial.print(encoderPositions[1], 1); Serial.print(",");
-        Serial.print(encoderPositions[2], 1); Serial.print(",");
-        Serial.print(encoderPositions[3], 1);
-        Serial.println("]");
     }
 }
 
@@ -490,17 +455,5 @@ void parseRearLine(const char* line) {
             encoderPositions[3] = pos;
         }
         axisQueryRear = (axisQueryRear + 1) % 2;
-    }
-}
-
-void sendCSVToMac() {
-    if (Serial.availableForWrite() > 30) {
-        Serial.print(encoderPositions[0], 4);
-        Serial.print(",");
-        Serial.print(encoderPositions[1], 4);
-        Serial.print(",");
-        Serial.print(encoderPositions[2], 4);
-        Serial.print(",");
-        Serial.println(encoderPositions[3], 4);
     }
 }
