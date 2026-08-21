@@ -2,13 +2,7 @@
  * arduino_odrive_relay.ino
  * 
  * Target MCU: Arduino Uno R4 WiFi
- * Purpose: Dual ODrive v3.6 Relay with Ultra-Fast Non-Blocking Local Web Server (Port 80).
- * 
- * Performance Fix:
- *   - Removed blocking HTTPS SSL cloud polling to prevent MCU freezes.
- *   - Local Web Server on Port 80 handles GET /w, /s, /a, /d in 1ms with 0% CPU blocking.
- *   - USB Serial CDC handles 115200 baud real-time commands.
- *   - Continuous 20Hz velocity output stream to ODrives.
+ * Purpose: Dual ODrive v3.6 Relay with Optimized Fast Socket Local Web Server (Port 80).
  */
 
 #include <Arduino.h>
@@ -127,7 +121,7 @@ void loop() {
     unsigned long currentMicros = micros();
     unsigned long currentMs = millis();
 
-    // 1. Non-Blocking Local Web Requests (Port 80)
+    // 1. Fast Socket Local Web Requests (Port 80)
     if (WiFi.status() == WL_CONNECTED) {
         handleLocalWebClients();
     }
@@ -201,7 +195,7 @@ void connectToWiFi() {
 }
 
 /**
- * Handles Incoming Local Web Server Requests (Port 80)
+ * Optimized Socket Handling for Instant Web Requests (Port 80)
  */
 void handleLocalWebClients() {
     WiFiClient client = localServer.available();
@@ -209,12 +203,13 @@ void handleLocalWebClients() {
 
     String request = "";
     unsigned long timeout = millis();
-    while (client.connected() && millis() - timeout < 100) {
-        if (client.available()) {
+    while (client.connected() && (millis() - timeout < 150)) {
+        while (client.available()) {
             char c = client.read();
             request += c;
             if (c == '\n') break;
         }
+        if (request.indexOf('\n') != -1) break;
     }
 
     if (request.length() > 0) {
@@ -227,19 +222,16 @@ void handleLocalWebClients() {
             }
         }
 
-        // Fast CORS-enabled HTTP Response
+        // Fast CORS-enabled Minimal Response
         client.println("HTTP/1.1 200 OK");
-        client.println("Content-Type: text/html");
+        client.println("Content-Type: text/plain");
         client.println("Access-Control-Allow-Origin: *");
-        client.println("Connection: close\r\n");
-        client.println("<!DOCTYPE html><html><head><meta name='viewport' content='width=device-width,initial-scale=1'><style>body{background:#06090b;color:#06b6d4;font-family:sans-serif;text-align:center;padding:30px}button{padding:22px;font-size:26px;margin:10px;border-radius:16px;border:none;background:#10b981;color:#fff;width:140px;height:90px}.stop{background:#ef4444}</style></head><body>");
-        client.println("<h2>Omni-Wheel Wireless Controller</h2>");
-        client.println("<div><a href='/w'><button>▲<br>W</button></a></div>");
-        client.println("<div><a href='/a'><button>◀<br>A</button></a> <a href='/x'><button class='stop'>🛑<br>STOP</button></a> <a href='/d'><button>▶<br>D</button></a></div>");
-        client.println("<div><a href='/s'><button>▼<br>S</button></a></div>");
-        client.println("</body></html>");
-        client.stop();
+        client.println("Connection: close");
+        client.println("Content-Length: 2\r\n");
+        client.println("OK");
+        client.flush();
     }
+    client.stop();
 }
 
 /**
@@ -345,7 +337,6 @@ void setupODriveRear() {
     odriveRear.println("c 1"); delay(100);
     odriveRear.println("w axis1.requested_state 1"); delay(100);
     odriveRear.println("w axis1.controller.config.control_mode 2"); delay(100);
-    odriveRear.println("w axis1.controller.config.input_mode 1"); delay(100);
     odriveRear.println("w axis1.requested_state 8"); delay(100);
 }
 
