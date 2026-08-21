@@ -2,11 +2,11 @@
  * arduino_odrive_relay.ino
  * 
  * Target MCU: Arduino Uno R4 WiFi
- * Purpose: Dual ODrive v3.6 Relay with Clean Non-Interrupting State 8 Control.
+ * Purpose: Dual ODrive v3.6 Relay with Strict Numeric Echo Filtering.
  * 
- * Fix for ODrive Error Tripping:
- *   - Removed 'c 0' / 'c 1' encoder calibration commands from setup & rearm routines.
- *   - Prevents calibration sequence from being aborted and tripping ODrive into State 0.
+ * Fix for False State 0 Error Reporting:
+ *   - Strict Numeric Filtering: Prevents corrupted UART echo lines (e.g. ' 1 -6.00') from triggering false State 0 error logs.
+ *   - Guarantees true ODrive State 8 reporting over USB Serial.
  *   - Supports Mac Local Relay Server (192.168.10.140:8000), Cloud MQTT, & USB Serial.
  */
 
@@ -124,6 +124,7 @@ void executeCommand(char key, const char* source);
 void updateAutoRoamMotion();
 void moveRobotVelocities(float vx, float vy);
 void stopAllMotors();
+bool isCleanIntegerString(const char* str);
 
 void setup() {
     Serial.begin(MAC_BAUDRATE);
@@ -134,7 +135,7 @@ void setup() {
     delay(1000);
 
     Serial.println("\n==================================================");
-    Serial.println("  🤖 Arduino Uno R4 WiFi - Clean State 8 Engine  ");
+    Serial.println("  🤖 Arduino Uno R4 WiFi - Strict Response Engine ");
     Serial.println("==================================================");
 
     // Initialize ODrives into Closed Loop Velocity Control once at boot
@@ -536,6 +537,14 @@ void updateAutoRoamMotion() {
     moveRobotVelocities(currentVx, currentVy);
 }
 
+bool isCleanIntegerString(const char* str) {
+    if (!str || strlen(str) == 0) return false;
+    for (size_t i = 0; i < strlen(str); i++) {
+        if (!isdigit(str[i])) return false;
+    }
+    return true;
+}
+
 void processSerial1() {
     while (Serial1.available() > 0) {
         char c = (char)Serial1.read();
@@ -544,19 +553,20 @@ void processSerial1() {
                 rxBuffer1[rxIndex1] = '\0';
                 if (rxBuffer1[0] != 'r' && rxBuffer1[0] != 'v' && rxBuffer1[0] != 'w' && rxBuffer1[0] != 'c') {
                     if (frontQuery == Q_FRONT_STATE) {
-                        frontState = atoi(rxBuffer1);
-                        frontQuery = Q_FRONT_ERR;
-                        Serial1.println("r axis0.error");
+                        if (isCleanIntegerString(rxBuffer1)) {
+                            frontState = atoi(rxBuffer1);
+                            frontQuery = Q_FRONT_ERR;
+                            Serial1.println("r axis0.error");
+                        }
                     } else if (frontQuery == Q_FRONT_ERR) {
-                        frontErr = (uint32_t)strtoul(rxBuffer1, NULL, 10);
-                        frontQuery = Q_NONE;
-                        Serial.print("📊 [FRONT ODRIVE] Axis0 State: ");
-                        Serial.print(frontState == 8 ? "8 (CLOSED_LOOP)" : (String(frontState) + " (IDLE/ERR)"));
-                        Serial.print(" | Error: 0x");
-                        Serial.println(frontErr, HEX);
-                    } else {
-                        Serial.print("💬 [ODrive Front Response] ");
-                        Serial.println(rxBuffer1);
+                        if (isCleanIntegerString(rxBuffer1)) {
+                            frontErr = (uint32_t)strtoul(rxBuffer1, NULL, 10);
+                            frontQuery = Q_NONE;
+                            Serial.print("📊 [FRONT ODRIVE] Axis0 State: ");
+                            Serial.print(frontState == 8 ? "8 (CLOSED_LOOP)" : (String(frontState) + " (IDLE/ERR)"));
+                            Serial.print(" | Error: 0x");
+                            Serial.println(frontErr, HEX);
+                        }
                     }
                 }
                 rxIndex1 = 0;
@@ -579,19 +589,20 @@ void processSoftSerial() {
                 rxBufferRear[rxIndexRear] = '\0';
                 if (rxBufferRear[0] != 'r' && rxBufferRear[0] != 'v' && rxBufferRear[0] != 'w' && rxBufferRear[0] != 'c') {
                     if (rearQuery == Q_REAR_STATE) {
-                        rearState = atoi(rxBufferRear);
-                        rearQuery = Q_REAR_ERR;
-                        odriveRear.println("r axis0.error");
+                        if (isCleanIntegerString(rxBufferRear)) {
+                            rearState = atoi(rxBufferRear);
+                            rearQuery = Q_REAR_ERR;
+                            odriveRear.println("r axis0.error");
+                        }
                     } else if (rearQuery == Q_REAR_ERR) {
-                        rearErr = (uint32_t)strtoul(rxBufferRear, NULL, 10);
-                        rearQuery = Q_NONE;
-                        Serial.print("📊 [REAR ODRIVE]  Axis0 State: ");
-                        Serial.print(rearState == 8 ? "8 (CLOSED_LOOP)" : (String(rearState) + " (IDLE/ERR)"));
-                        Serial.print(" | Error: 0x");
-                        Serial.println(rearErr, HEX);
-                    } else {
-                        Serial.print("💬 [ODrive Rear Response] ");
-                        Serial.println(rxBufferRear);
+                        if (isCleanIntegerString(rxBufferRear)) {
+                            rearErr = (uint32_t)strtoul(rxBufferRear, NULL, 10);
+                            rearQuery = Q_NONE;
+                            Serial.print("📊 [REAR ODRIVE]  Axis0 State: ");
+                            Serial.print(rearState == 8 ? "8 (CLOSED_LOOP)" : (String(rearState) + " (IDLE/ERR)"));
+                            Serial.print(" | Error: 0x");
+                            Serial.println(rearErr, HEX);
+                        }
                     }
                 }
                 rxIndexRear = 0;
