@@ -1,0 +1,12 @@
+{
+  "name": "omni-wheel-control",
+  "version": "1.0.0",
+  "description": "Dual ODrive Omni-wheel Control & 3D Media Art Swamp Visualizer",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "express": "^4.19.2"
+  }
+}
