@@ -2,13 +2,12 @@
  * arduino_odrive_relay.ino
  * 
  * Target MCU: Arduino Uno R4 WiFi
- * Purpose: Dual ODrive v3.6 Relay with 0.1ms Ultra-Fast Plaintext API Endpoint.
+ * Purpose: Dual ODrive v3.6 Relay with Mac Local Server Client Polling (192.168.10.140:8000).
  * 
- * Performance Fix for Web Control:
- *   - Root Path (GET /): Serves full HTML Web Controller UI.
- *   - Command Paths (GET /w, /s, /a, /d, /x): Returns ultra-fast 2-byte "OK" plaintext response (0.1ms).
- *   - Eliminates Wi-Fi HTTP page re-transmission lag on hold pulses.
- *   - Supports Render Cloud WSS MQTT (broker.hivemq.com:1883), Local Web (Port 80), & USB Serial.
+ * Mac Local Server Architecture:
+ *   - Mac hosts the Web UI server at http://192.168.10.140:8000.
+ *   - Arduino connects as a Wi-Fi Client polling http://192.168.10.140:8000/api/poll every 50ms.
+ *   - Also supports Render Cloud WSS MQTT (broker.hivemq.com:1883) & USB Serial.
  */
 
 #include <Arduino.h>
@@ -23,16 +22,18 @@
 const char* WIFI_SSID = "sanhak";      // Wi-Fi SSID
 const char* WIFI_PASS = "20020520";  // Wi-Fi Password
 
+// --- MAC LOCAL RELAY SERVER ---
+const char* MAC_SERVER_IP = "192.168.10.140";
+const int   MAC_SERVER_PORT = 8000;
+
 // --- CLOUD MQTT BROKER ---
 const char mqttBroker[] = "broker.hivemq.com";
 const int   mqttPort   = 1883;
 const char topicCmd[]  = "omniwheel/cmd";
 
 WiFiClient wifiClient;
+WiFiClient macClient;
 MqttClient mqttClient(wifiClient);
-
-// Local HTTP Web Server on Port 80
-WiFiServer localServer(80);
 
 // Rear ODrive SoftwareSerial on Pins 9 (RX), 8 (TX)
 SoftwareSerial odriveRear(9, 8);
@@ -40,6 +41,10 @@ SoftwareSerial odriveRear(9, 8);
 // 20Hz Continuous Velocity Update Loop (50ms)
 const unsigned long ROAM_INTERVAL_MS = 50;
 unsigned long lastRoamMs = 0;
+
+// Mac Server Polling Interval (50ms)
+const unsigned long MAC_POLL_INTERVAL_MS = 50;
+unsigned long lastMacPollMs = 0;
 
 // Reconnect Timer for MQTT
 const unsigned long MQTT_RECONNECT_INTERVAL_MS = 3000;
@@ -56,7 +61,7 @@ unsigned long lastMoveCommandMs = 0;
 // System Motion State
 bool isAutoRoamEnabled = false;
 bool isArmed = false;
-float currentDriveSpeed = 4.0f; // Velocity turns/sec (Default 4.0 rps = 240 RPM)
+float currentDriveSpeed = 6.0f; // Velocity turns/sec (Default 6.0 rps = 360 RPM for high torque)
 
 // Continuous Target & Current Velocities (Vx, Vy)
 float targetVx = 0.0f;
@@ -103,8 +108,8 @@ QueryStep rearQuery = Q_NONE;
 
 // Function Prototypes
 void connectToWiFi();
+void pollMacServer();
 void pollCloudMQTT();
-void handleLocalWebClients();
 void setupODriveFront();
 void setupODriveRear();
 void rearmODrivesIfNeeded();
@@ -126,7 +131,7 @@ void setup() {
     delay(1000);
 
     Serial.println("\n==================================================");
-    Serial.println("  🤖 Arduino Uno R4 WiFi - Ultra-Fast Web System   ");
+    Serial.println("  🤖 Arduino Uno R4 WiFi - Mac Server Client Mode  ");
     Serial.println("==================================================");
 
     // Initialize ODrives into Closed Loop Velocity Control once at boot
@@ -137,21 +142,22 @@ void setup() {
     memset(rxBuffer1, 0, RX_BUFFER_SIZE);
     memset(rxBufferRear, 0, RX_BUFFER_SIZE);
 
-    // Connect to Wi-Fi Internet & Start Local Web Server
+    // Connect to Wi-Fi Internet
     connectToWiFi();
 
     Serial.println("==================================================");
-    Serial.println("▶️ Ready! Listening for Web & MQTT Commands.");
+    Serial.print("▶️ Polling Mac Local Server: http://");
+    Serial.print(MAC_SERVER_IP); Serial.print(":"); Serial.println(MAC_SERVER_PORT);
     Serial.println("==================================================\n");
 }
 
 void loop() {
     unsigned long currentMs = millis();
 
-    // 1. Maintain Cloud MQTT Connection & Parse Web Commands
+    // 1. Maintain Wi-Fi Connection & Poll Mac Local Server & Cloud MQTT
     if (WiFi.status() == WL_CONNECTED) {
+        pollMacServer();
         pollCloudMQTT();
-        handleLocalWebClients();
     }
 
     // 2. Real-Time USB Serial Backup Commands
@@ -190,14 +196,45 @@ void loop() {
 }
 
 /**
- * Polls Front & Rear ODrive state & error status
+ * Polls Mac Local Relay Server (http://192.168.10.140:8000/api/poll) every 50ms
  */
-void queryODriveStatus() {
-    frontQuery = Q_FRONT_STATE;
-    Serial1.println("r axis0.current_state");
-    
-    rearQuery = Q_REAR_STATE;
-    odriveRear.println("r axis0.current_state");
+void pollMacServer() {
+    unsigned long now = millis();
+    if (now - lastMacPollMs < MAC_POLL_INTERVAL_MS) return;
+    lastMacPollMs = now;
+
+    if (macClient.connect(MAC_SERVER_IP, MAC_SERVER_PORT)) {
+        macClient.println("GET /api/poll HTTP/1.1");
+        macClient.print("Host: "); macClient.println(MAC_SERVER_IP);
+        macClient.println("Connection: close\r\n");
+
+        unsigned long startWait = millis();
+        while (!macClient.available() && (millis() - startWait < 40)) {
+            delay(1);
+        }
+
+        String response = "";
+        while (macClient.available()) {
+            char c = macClient.read();
+            response += c;
+        }
+        macClient.stop();
+
+        if (response.length() > 0) {
+            int lastNewline = response.lastIndexOf('\n');
+            if (lastNewline != -1 && lastNewline < response.length() - 1) {
+                String payload = response.substring(lastNewline + 1);
+                payload.trim();
+                if (payload.length() > 0) {
+                    char cmdKey = toLowerCase(payload.charAt(0));
+                    if (cmdKey == 'w' || cmdKey == 's' || cmdKey == 'a' || cmdKey == 'd' || 
+                        cmdKey == 'x' || cmdKey == 'o' || cmdKey == 'i' || (cmdKey >= '1' && cmdKey <= '9')) {
+                        executeCommand(cmdKey, "Mac Local Server");
+                    }
+                }
+            }
+        }
+    }
 }
 
 /**
@@ -229,7 +266,7 @@ void pollCloudMQTT() {
 }
 
 /**
- * Connect to Wi-Fi & Start Local Web Server
+ * Connect to Wi-Fi
  */
 void connectToWiFi() {
     if (WiFi.status() == WL_NO_MODULE) {
@@ -254,79 +291,22 @@ void connectToWiFi() {
 
     if (WiFi.status() == WL_CONNECTED && WiFi.localIP() != IPAddress(0, 0, 0, 0)) {
         Serial.println("\n✅ Wi-Fi Internet Connected!");
-        Serial.print("🌐 Local Web Controller URL: http://");
+        Serial.print("🌐 Arduino IP: http://");
         Serial.println(WiFi.localIP());
-        localServer.begin();
     } else {
         Serial.println("\n⚠️ Wi-Fi DHCP Pending.");
-        if (WiFi.status() == WL_CONNECTED) {
-            localServer.begin();
-        }
     }
 }
 
 /**
- * Handles Incoming Local Web Server Requests (Port 80)
- * Ultra-Fast API Endpoint Separation: 2-byte OK for commands, full HTML only for Root /
+ * Polls Front & Rear ODrive state & error status
  */
-void handleLocalWebClients() {
-    WiFiClient client = localServer.available();
-    if (!client) return;
-
-    unsigned long startWait = millis();
-    while (!client.available() && (millis() - startWait < 40)) {
-        delay(1);
-    }
-
-    String request = "";
-    while (client.available()) {
-        char c = client.read();
-        request += c;
-        if (c == '\n') break;
-    }
-
-    if (request.length() > 0) {
-        int getIndex = request.indexOf("GET /");
-        if (getIndex != -1) {
-            String path = request.substring(getIndex + 5);
-            path.trim();
-            
-            bool isRoot = (path.length() == 0 || path.startsWith("HTTP/"));
-
-            if (!isRoot && path.length() > 0) {
-                char cmdKey = toLowerCase(path.charAt(0));
-                if (cmdKey == 'w' || cmdKey == 's' || cmdKey == 'a' || cmdKey == 'd' || 
-                    cmdKey == 'x' || cmdKey == 'o' || cmdKey == 'i' || (cmdKey >= '1' && cmdKey <= '9')) {
-                    executeCommand(cmdKey, "Wi-Fi Web");
-                }
-            }
-
-            if (isRoot) {
-                // Serve full HTML controller page only on root GET /
-                client.println("HTTP/1.1 200 OK");
-                client.println("Content-Type: text/html");
-                client.println("Access-Control-Allow-Origin: *");
-                client.println("Connection: close\r\n");
-                client.println("<!DOCTYPE html><html><head><meta name='viewport' content='width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no'><style>body{background:#06090b;color:#06b6d4;font-family:sans-serif;text-align:center;padding-top:20px;user-select:none;touch-action:none}button{padding:20px;font-size:24px;margin:8px;border-radius:18px;border:1px solid rgba(6,182,212,0.4);background:rgba(255,255,255,0.06);color:#fff;width:120px;height:80px;box-shadow:0 4px 12px rgba(0,0,0,0.4)}button:active{background:#06b6d4;color:#000;box-shadow:0 0 20px #06b6d4}.stop{background:rgba(244,63,94,0.2);border-color:#f43f5e;color:#f43f5e}</style></head><body>");
-                client.println("<h2>Omni-Wheel Hold Controller</h2>");
-                client.println("<div><button onmousedown=\"fetch('/w')\" onmouseup=\"fetch('/x')\" ontouchstart=\"fetch('/w')\" ontouchend=\"fetch('/x')\">▲<br>W</button></div>");
-                client.println("<div><button onmousedown=\"fetch('/a')\" onmouseup=\"fetch('/x')\" ontouchstart=\"fetch('/a')\" ontouchend=\"fetch('/x')\">◀<br>A</button> <button class='stop' onclick=\"fetch('/x')\">🛑<br>STOP</button> <button onmousedown=\"fetch('/d')\" onmouseup=\"fetch('/x')\" ontouchstart=\"fetch('/d')\" ontouchend=\"fetch('/x')\">▶<br>D</button></div>");
-                client.println("<div><button onmousedown=\"fetch('/s')\" onmouseup=\"fetch('/x')\" ontouchstart=\"fetch('/s')\" ontouchend=\"fetch('/x')\">▼<br>S</button></div>");
-                client.println("<p style='font-size:12px;color:#64748b;margin-top:15px'>Hold button to move. Release to stop.</p>");
-                client.println("</body></html>");
-            } else {
-                // Ultra-fast 2-byte OK response for API command fetches (/w, /s, /a, /d, /x)
-                client.println("HTTP/1.1 200 OK");
-                client.println("Content-Type: text/plain");
-                client.println("Access-Control-Allow-Origin: *");
-                client.println("Connection: close");
-                client.println("Content-Length: 2\r\n");
-                client.println("OK");
-            }
-            client.flush();
-        }
-    }
-    client.stop();
+void queryODriveStatus() {
+    frontQuery = Q_FRONT_STATE;
+    Serial1.println("r axis0.current_state");
+    
+    rearQuery = Q_REAR_STATE;
+    odriveRear.println("r axis0.current_state");
 }
 
 /**
@@ -399,7 +379,7 @@ void executeCommand(char key, const char* source) {
         Serial.print("🤖 ["); Serial.print(source); Serial.println(" Received] Cmd: AUTO ROAM [I]");
     }
     else if (key >= '1' && key <= '9') {
-        currentDriveSpeed = 1.0f + (key - '1') * 1.5f;
+        currentDriveSpeed = 2.0f + (key - '1') * 2.0f;
         Serial.print("⚙️ ["); Serial.print(source); Serial.print(" Received] Speed Set To: ");
         Serial.print(currentDriveSpeed); Serial.println(" turns/s");
     }
@@ -438,35 +418,45 @@ void stopAllMotors() {
 }
 
 void setupODriveFront() {
-    Serial1.println("w axis0.error 0"); delay(50);
-    Serial1.println("w axis1.error 0"); delay(50);
-    Serial1.println("c 0"); delay(50);
-    Serial1.println("c 1"); delay(50);
-    Serial1.println("w axis0.requested_state 1"); delay(50);
-    Serial1.println("w axis0.controller.config.control_mode 2"); delay(50);
-    Serial1.println("w axis0.controller.config.input_mode 1"); delay(50);
-    Serial1.println("w axis0.requested_state 8"); delay(50);
+    Serial1.println("w axis0.error 0"); delay(30);
+    Serial1.println("w axis1.error 0"); delay(30);
+    Serial1.println("c 0"); delay(30);
+    Serial1.println("c 1"); delay(30);
 
-    Serial1.println("w axis1.requested_state 1"); delay(50);
-    Serial1.println("w axis1.controller.config.control_mode 2"); delay(50);
-    Serial1.println("w axis1.controller.config.input_mode 1"); delay(50);
-    Serial1.println("w axis1.requested_state 8"); delay(50);
+    // Boost motor current limits to 25A for maximum torque!
+    Serial1.println("w axis0.motor.config.current_lim 25.0"); delay(30);
+    Serial1.println("w axis1.motor.config.current_lim 25.0"); delay(30);
+
+    Serial1.println("w axis0.requested_state 1"); delay(30);
+    Serial1.println("w axis0.controller.config.control_mode 2"); delay(30);
+    Serial1.println("w axis0.controller.config.input_mode 1"); delay(30);
+    Serial1.println("w axis0.requested_state 8"); delay(30);
+
+    Serial1.println("w axis1.requested_state 1"); delay(30);
+    Serial1.println("w axis1.controller.config.control_mode 2"); delay(30);
+    Serial1.println("w axis1.controller.config.input_mode 1"); delay(30);
+    Serial1.println("w axis1.requested_state 8"); delay(30);
 }
 
 void setupODriveRear() {
-    odriveRear.println("w axis0.error 0"); delay(50);
-    odriveRear.println("w axis1.error 0"); delay(50);
-    odriveRear.println("c 0"); delay(50);
-    odriveRear.println("c 1"); delay(50);
-    odriveRear.println("w axis0.requested_state 1"); delay(50);
-    odriveRear.println("w axis0.controller.config.control_mode 2"); delay(50);
-    odriveRear.println("w axis0.controller.config.input_mode 1"); delay(50);
-    odriveRear.println("w axis0.requested_state 8"); delay(50);
+    odriveRear.println("w axis0.error 0"); delay(30);
+    odriveRear.println("w axis1.error 0"); delay(30);
+    odriveRear.println("c 0"); delay(30);
+    odriveRear.println("c 1"); delay(30);
 
-    odriveRear.println("w axis1.requested_state 1"); delay(50);
-    odriveRear.println("w axis1.controller.config.control_mode 2"); delay(50);
-    odriveRear.println("w axis1.controller.config.input_mode 1"); delay(50);
-    odriveRear.println("w axis1.requested_state 8"); delay(50);
+    // Boost motor current limits to 25A for maximum torque!
+    odriveRear.println("w axis0.motor.config.current_lim 25.0"); delay(30);
+    odriveRear.println("w axis1.motor.config.current_lim 25.0"); delay(30);
+
+    odriveRear.println("w axis0.requested_state 1"); delay(30);
+    odriveRear.println("w axis0.controller.config.control_mode 2"); delay(30);
+    odriveRear.println("w axis0.controller.config.input_mode 1"); delay(30);
+    odriveRear.println("w axis0.requested_state 8"); delay(30);
+
+    odriveRear.println("w axis1.requested_state 1"); delay(30);
+    odriveRear.println("w axis1.controller.config.control_mode 2"); delay(30);
+    odriveRear.println("w axis1.controller.config.input_mode 1"); delay(30);
+    odriveRear.println("w axis1.requested_state 8"); delay(30);
 }
 
 void handleWebControlInput() {
