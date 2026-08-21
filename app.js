@@ -2,10 +2,9 @@
  * app.js
  * Omni-wheel Robot Controller Engine
  * 
- * Multi-Channel Control Dispatcher:
- *   1. Cloud MQTT WSS (wss://broker.hivemq.com:8884/mqtt) -> Works 100% on Render HTTPS!
- *   2. USB Web Serial (Local Cable Backup)
- *   3. Render REST API Backup (/api/cmd?set=w)
+ * Hold-To-Drive Mode:
+ *   - Robot drives ONLY while button/key is pressed or held down!
+ *   - Releases button or key -> Dispatches instant STOP 'x' command.
  */
 
 // ==========================================
@@ -18,13 +17,7 @@ class SerialController {
         this.port = null;
         this.reader = null;
         this.writer = null;
-        this.readableStreamClosed = null;
-        this.writableStreamClosed = null;
         this.keepReading = false;
-        
-        this.packetCount = 0;
-        this.lastFpsCalc = performance.now();
-        this.currentHz = 0;
     }
 
     async connect() {
@@ -61,7 +54,6 @@ class SerialController {
         this.reader = reader;
 
         let buffer = '';
-
         try {
             while (this.keepReading) {
                 const { value, done } = await reader.read();
@@ -69,35 +61,13 @@ class SerialController {
                 if (value) {
                     buffer += value;
                     const lines = buffer.split('\n');
-                    buffer = lines.pop(); // Keep partial frame in buffer
-
-                    for (const line of lines) {
-                        this.parseLine(line.trim());
-                    }
+                    buffer = lines.pop();
                 }
             }
         } catch (error) {
             console.warn('[Web Serial Read Error]', error);
         } finally {
             reader.releaseLock();
-        }
-    }
-
-    parseLine(line) {
-        if (!line) return;
-        const tokens = line.split(',').map(Number);
-        if (tokens.length === 4 && !tokens.some(isNaN)) {
-            this.packetCount++;
-            const now = performance.now();
-            if (now - this.lastFpsCalc >= 1000) {
-                this.currentHz = Math.round((this.packetCount * 1000) / (now - this.lastFpsCalc));
-                this.packetCount = 0;
-                this.lastFpsCalc = now;
-            }
-
-            if (this.onData) {
-                this.onData(tokens, this.currentHz);
-            }
         }
     }
 
@@ -113,15 +83,9 @@ class SerialController {
 
     async disconnect() {
         this.keepReading = false;
-        if (this.reader) {
-            await this.reader.cancel().catch(() => {});
-        }
-        if (this.writer) {
-            await this.writer.close().catch(() => {});
-        }
-        if (this.port) {
-            await this.port.close().catch(() => {});
-        }
+        if (this.reader) await this.reader.cancel().catch(() => {});
+        if (this.writer) await this.writer.close().catch(() => {});
+        if (this.port) await this.port.close().catch(() => {});
         this.port = null;
         this.reader = null;
         this.writer = null;
@@ -131,7 +95,7 @@ class SerialController {
 
 
 // ==========================================
-// 2. CLOUD MQTT WSS CONTROLLER (RENDER HTTPS COMPATIBLE)
+// 2. CLOUD MQTT WSS CONTROLLER (RENDER HTTPS)
 // ==========================================
 class CloudMqttWssController {
     constructor(onStatusChange) {
@@ -192,6 +156,7 @@ class RobotControlDispatcher {
         this.cloudMqttController = cloudMqttController;
         this.statusBadge = statusBadge;
         this.statusText = statusText;
+        this.lastCmd = null;
     }
 
     updateStatus(isConnected, text) {
@@ -207,7 +172,9 @@ class RobotControlDispatcher {
     }
 
     send(cmd) {
-        // Path 1: Cloud MQTT WSS (Works over Render HTTPS!)
+        this.lastCmd = cmd;
+
+        // Path 1: Cloud MQTT WSS (Render HTTPS)
         if (this.cloudMqttController) {
             this.cloudMqttController.send(cmd);
         }
@@ -224,10 +191,10 @@ class RobotControlDispatcher {
 
 
 // ==========================================
-// 4. MAIN APPLICATION BOOTSTRAP
+// 4. MAIN APPLICATION & HOLD-TO-DRIVE BINDINGS
 // ==========================================
 document.addEventListener('DOMContentLoaded', () => {
-    // DOM Handles
+    // DOM Elements
     const btnConnect = document.getElementById('btn-connect');
     const statusBadge = document.getElementById('status-badge');
     const statusText = document.getElementById('status-text');
@@ -239,20 +206,29 @@ document.addEventListener('DOMContentLoaded', () => {
     const btnStop = document.getElementById('btn-stop');
     const btnAuto = document.getElementById('btn-auto');
     const btnStopAll = document.getElementById('btn-stop-all');
+    const speedPills = document.querySelectorAll('.speed-pill');
 
-    // Instantiate Controllers
-    const serialController = new SerialController(
-        (encoders, hz) => {},
-        (isConnected, label) => {
-            dispatcher.updateStatus(isConnected, label);
-        }
-    );
+    // Instantiate Controllers & Dispatcher
+    const serialController = new SerialController(null, (isConnected, label) => {
+        dispatcher.updateStatus(isConnected, label);
+    });
 
     const cloudMqttController = new CloudMqttWssController((isConnected, label) => {
         dispatcher.updateStatus(isConnected, label);
     });
 
     const dispatcher = new RobotControlDispatcher(serialController, cloudMqttController, statusBadge, statusText);
+
+    // Speed Pill Click Handler
+    speedPills.forEach(pill => {
+        pill.addEventListener('click', (e) => {
+            e.preventDefault();
+            speedPills.forEach(p => p.classList.remove('active'));
+            pill.classList.add('active');
+            const level = pill.getAttribute('data-speed');
+            dispatcher.send(level);
+        });
+    });
 
     // USB Serial Connect Button
     if (btnConnect) {
@@ -265,25 +241,62 @@ document.addEventListener('DOMContentLoaded', () => {
         });
     }
 
-    // Command Sender Function
-    const triggerCmd = (cmd, btnElement = null) => {
-        dispatcher.send(cmd);
-        if (btnElement) {
-            btnElement.classList.add('active');
-            setTimeout(() => btnElement.classList.remove('active'), 180);
-        }
-    };
+    // Helper: Hold-To-Drive Binding Function
+    function bindHoldToDrive(element, moveCmd) {
+        if (!element) return;
 
-    // Button Click Listeners
-    if (btnUp) btnUp.addEventListener('click', () => triggerCmd('w', btnUp));
-    if (btnDown) btnDown.addEventListener('click', () => triggerCmd('s', btnDown));
-    if (btnLeft) btnLeft.addEventListener('click', () => triggerCmd('a', btnLeft));
-    if (btnRight) btnRight.addEventListener('click', () => triggerCmd('d', btnRight));
-    if (btnStop) btnStop.addEventListener('click', () => triggerCmd('x', btnStop));
-    if (btnAuto) btnAuto.addEventListener('click', () => triggerCmd('i', btnAuto));
-    if (btnStopAll) btnStopAll.addEventListener('click', () => triggerCmd('o', btnStopAll));
+        const startMove = (e) => {
+            e.preventDefault();
+            element.classList.add('active');
+            dispatcher.send(moveCmd);
+        };
 
-    // Keyboard WASD & Arrow Keys Event Listeners
+        const stopMove = (e) => {
+            e.preventDefault();
+            element.classList.remove('active');
+            dispatcher.send('x');
+        };
+
+        // Mouse Events
+        element.addEventListener('mousedown', startMove);
+        element.addEventListener('mouseup', stopMove);
+        element.addEventListener('mouseleave', stopMove);
+
+        // Touch Events (Mobile Touchscreen)
+        element.addEventListener('touchstart', startMove, { passive: false });
+        element.addEventListener('touchend', stopMove, { passive: false });
+        element.addEventListener('touchcancel', stopMove, { passive: false });
+    }
+
+    // Bind D-Pad Direction Buttons
+    bindHoldToDrive(btnUp, 'w');
+    bindHoldToDrive(btnDown, 's');
+    bindHoldToDrive(btnLeft, 'a');
+    bindHoldToDrive(btnRight, 'd');
+
+    // Tap Action Buttons (Stop & Auto Roam)
+    if (btnStop) {
+        btnStop.addEventListener('click', (e) => {
+            e.preventDefault();
+            dispatcher.send('x');
+        });
+    }
+
+    if (btnAuto) {
+        btnAuto.addEventListener('click', (e) => {
+            e.preventDefault();
+            dispatcher.send('i');
+        });
+    }
+
+    if (btnStopAll) {
+        btnStopAll.addEventListener('click', (e) => {
+            e.preventDefault();
+            dispatcher.send('o');
+        });
+    }
+
+    // Keyboard WASD & Arrow Key Hold-To-Drive Handler
     const keyMap = {
         'w': { cmd: 'w', btn: btnUp },
         'arrowup': { cmd: 'w', btn: btnUp },
@@ -292,18 +305,41 @@ document.addEventListener('DOMContentLoaded', () => {
         'a': { cmd: 'a', btn: btnLeft },
         'arrowleft': { cmd: 'a', btn: btnLeft },
         'd': { cmd: 'd', btn: btnRight },
-        'arrowright': { cmd: 'd', btn: btnRight },
-        'x': { cmd: 'x', btn: btnStop },
-        ' ': { cmd: 'x', btn: btnStop },
-        'i': { cmd: 'i', btn: btnAuto },
-        'o': { cmd: 'o', btn: btnStopAll }
+        'arrowright': { cmd: 'd', btn: btnRight }
     };
+
+    const activeKeys = new Set();
 
     window.addEventListener('keydown', (e) => {
         const k = e.key.toLowerCase();
+        if (keyMap[k] && !activeKeys.has(k)) {
+            e.preventDefault();
+            activeKeys.add(k);
+            if (keyMap[k].btn) keyMap[k].btn.classList.add('active');
+            dispatcher.send(keyMap[k].cmd);
+        } else if (k === 'x' || k === ' ') {
+            e.preventDefault();
+            dispatcher.send('x');
+        } else if (k === 'i') {
+            e.preventDefault();
+            dispatcher.send('i');
+        } else if (k >= '1' && k <= '9') {
+            e.preventDefault();
+            dispatcher.send(k);
+        }
+    });
+
+    window.addEventListener('keyup', (e) => {
+        const k = e.key.toLowerCase();
         if (keyMap[k]) {
             e.preventDefault();
-            triggerCmd(keyMap[k].cmd, keyMap[k].btn);
+            activeKeys.delete(k);
+            if (keyMap[k].btn) keyMap[k].btn.classList.remove('active');
+            
+            // If all direction keys released, stop robot!
+            if (activeKeys.size === 0) {
+                dispatcher.send('x');
+            }
         }
     });
 });

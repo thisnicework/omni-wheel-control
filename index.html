@@ -2,20 +2,21 @@
 <html lang="ko">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-select=no">
-    <title>Omni-Wheel Robot Remote Controller</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>Omni-Wheel Cyberpunk Controller</title>
     <!-- MQTT.js Cloud Library -->
     <script src="https://unpkg.com/mqtt/dist/mqtt.min.js"></script>
     <style>
         :root {
-            --bg-color: #06090b;
-            --card-bg: rgba(13, 20, 26, 0.85);
-            --card-border: rgba(16, 185, 129, 0.3);
-            --accent-green: #10b981;
-            --accent-cyan: #06b6d4;
-            --accent-red: #ef4444;
-            --text-primary: #ecfeff;
-            --text-secondary: #94a3b8;
+            --bg-dark: #05080c;
+            --card-bg: rgba(10, 18, 26, 0.88);
+            --card-border: rgba(6, 182, 212, 0.35);
+            --neon-cyan: #06b6d4;
+            --neon-green: #10b981;
+            --neon-red: #f43f5e;
+            --neon-amber: #f59e0b;
+            --text-main: #f0fdfa;
+            --text-sub: #64748b;
             --font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
         }
 
@@ -25,22 +26,22 @@
             padding: 0;
             user-select: none;
             -webkit-user-select: none;
-            touch-action: manipulation;
+            touch-action: none;
         }
 
         body, html {
             width: 100%;
             height: 100%;
             overflow: hidden;
-            background: radial-gradient(circle at center, #0f1c24 0%, #040709 100%);
+            background: radial-gradient(circle at center, #0c1822 0%, #030609 100%);
             font-family: var(--font-family);
-            color: var(--text-primary);
+            color: var(--text-main);
             display: flex;
             align-items: center;
             justify-content: center;
         }
 
-        /* Subtle Cyber Grid Background */
+        /* Cyber Background Overlay */
         body::before {
             content: "";
             position: absolute;
@@ -49,63 +50,63 @@
             top: -50%;
             left: -50%;
             background-image: 
-                linear-gradient(rgba(6, 182, 212, 0.05) 1px, transparent 1px),
-                linear-gradient(90deg, rgba(6, 182, 212, 0.05) 1px, transparent 1px);
-            background-size: 40px 40px;
+                radial-gradient(rgba(6, 182, 212, 0.08) 1px, transparent 0);
+            background-size: 28px 28px;
             pointer-events: none;
             z-index: 0;
         }
 
-        /* Centered Controller Main Card */
+        /* Main Controller Card */
         .controller-card {
             position: relative;
             z-index: 10;
-            width: 90%;
-            max-width: 360px;
-            padding: 26px 20px;
+            width: 92%;
+            max-width: 380px;
+            padding: 24px 20px;
             background: var(--card-bg);
-            backdrop-filter: blur(16px);
-            -webkit-backdrop-filter: blur(16px);
+            backdrop-filter: blur(20px);
+            -webkit-backdrop-filter: blur(20px);
             border: 1px solid var(--card-border);
-            border-radius: 24px;
-            box-shadow: 0 20px 50px rgba(0, 0, 0, 0.8), 0 0 30px rgba(16, 185, 129, 0.15);
+            border-radius: 28px;
+            box-shadow: 0 25px 60px rgba(0, 0, 0, 0.9), 0 0 35px rgba(6, 182, 212, 0.15);
             display: flex;
             flex-direction: column;
             align-items: center;
             gap: 16px;
         }
 
+        /* Header Title & Badge */
         .header-title {
-            font-size: 16px;
-            font-weight: 800;
-            letter-spacing: 1px;
+            font-size: 15px;
+            font-weight: 900;
+            letter-spacing: 1.5px;
             text-transform: uppercase;
-            color: var(--accent-cyan);
+            color: var(--neon-cyan);
             display: flex;
             align-items: center;
             gap: 8px;
-            text-shadow: 0 0 10px rgba(6, 182, 212, 0.4);
+            text-shadow: 0 0 12px rgba(6, 182, 212, 0.5);
         }
 
         .status-badge {
             display: inline-flex;
             align-items: center;
             gap: 6px;
-            padding: 5px 14px;
+            padding: 6px 16px;
             border-radius: 20px;
             font-size: 11px;
-            font-weight: 600;
-            background: rgba(239, 68, 68, 0.15);
-            color: #f87171;
-            border: 1px solid rgba(239, 68, 68, 0.3);
+            font-weight: 700;
+            background: rgba(244, 63, 94, 0.15);
+            color: var(--neon-red);
+            border: 1px solid rgba(244, 63, 94, 0.35);
             transition: all 0.3s ease;
         }
 
         .status-badge.connected {
             background: rgba(16, 185, 129, 0.15);
-            color: var(--accent-green);
-            border-color: rgba(16, 185, 129, 0.4);
-            box-shadow: 0 0 12px rgba(16, 185, 129, 0.2);
+            color: var(--neon-green);
+            border-color: rgba(16, 185, 129, 0.45);
+            box-shadow: 0 0 15px rgba(16, 185, 129, 0.25);
         }
 
         .status-dot {
@@ -116,21 +117,63 @@
             box-shadow: 0 0 8px currentColor;
         }
 
-        /* D-Pad Controller Layout */
+        /* Mode & Speed Bar */
+        .mode-bar {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            width: 100%;
+            background: rgba(255, 255, 255, 0.03);
+            border: 1px solid rgba(255, 255, 255, 0.08);
+            border-radius: 14px;
+            padding: 8px 12px;
+        }
+
+        .mode-label {
+            font-size: 11px;
+            font-weight: 600;
+            color: var(--text-sub);
+        }
+
+        .speed-selector {
+            display: flex;
+            gap: 6px;
+        }
+
+        .speed-pill {
+            padding: 4px 10px;
+            border-radius: 10px;
+            background: rgba(255, 255, 255, 0.05);
+            border: 1px solid rgba(255, 255, 255, 0.12);
+            color: var(--text-sub);
+            font-size: 11px;
+            font-weight: 700;
+            cursor: pointer;
+            transition: all 0.2s ease;
+        }
+
+        .speed-pill.active {
+            background: var(--neon-cyan);
+            color: #000;
+            border-color: var(--neon-cyan);
+            box-shadow: 0 0 10px rgba(6, 182, 212, 0.4);
+        }
+
+        /* Directional Pad Container */
         .dpad-container {
             display: grid;
-            grid-template-columns: repeat(3, 76px);
-            grid-template-rows: repeat(3, 76px);
-            gap: 10px;
-            margin: 8px 0;
+            grid-template-columns: repeat(3, 80px);
+            grid-template-rows: repeat(3, 80px);
+            gap: 12px;
+            margin: 6px 0;
         }
 
         .dpad-btn {
-            background: rgba(255, 255, 255, 0.05);
-            border: 1px solid rgba(255, 255, 255, 0.15);
-            border-radius: 16px;
-            color: var(--text-primary);
-            font-size: 18px;
+            background: rgba(255, 255, 255, 0.04);
+            border: 1px solid rgba(255, 255, 255, 0.14);
+            border-radius: 20px;
+            color: var(--text-main);
+            font-size: 20px;
             font-weight: bold;
             cursor: pointer;
             display: flex;
@@ -138,49 +181,45 @@
             align-items: center;
             justify-content: center;
             gap: 2px;
-            transition: all 0.15s ease;
-            box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+            transition: all 0.1s cubic-bezier(0.4, 0, 0.2, 1);
+            box-shadow: 0 6px 16px rgba(0, 0, 0, 0.4);
+            position: relative;
+            overflow: hidden;
         }
 
         .dpad-btn span {
             font-size: 10px;
-            color: var(--text-secondary);
-            font-weight: 600;
+            color: var(--text-sub);
+            font-weight: 700;
         }
 
         .dpad-btn:hover {
-            background: rgba(6, 182, 212, 0.25);
-            border-color: var(--accent-cyan);
-            box-shadow: 0 0 16px rgba(6, 182, 212, 0.4);
-            transform: translateY(-2px);
+            background: rgba(6, 182, 212, 0.15);
+            border-color: var(--neon-cyan);
         }
 
+        /* Active Hold Driving Glow State */
         .dpad-btn:active, .dpad-btn.active {
-            background: var(--accent-cyan);
-            color: #000;
-            transform: scale(0.92);
-            box-shadow: 0 0 20px var(--accent-cyan);
+            background: var(--neon-cyan) !important;
+            color: #000 !important;
+            transform: scale(0.92) !important;
+            box-shadow: 0 0 25px var(--neon-cyan), 0 0 50px rgba(6, 182, 212, 0.4) !important;
         }
 
         .dpad-btn.active span {
-            color: #000;
+            color: #000 !important;
         }
 
         .dpad-stop {
-            background: rgba(239, 68, 68, 0.15);
-            border-color: rgba(239, 68, 68, 0.4);
-            color: #ef4444;
-        }
-
-        .dpad-stop:hover {
-            background: rgba(239, 68, 68, 0.35);
-            border-color: var(--accent-red);
-            box-shadow: 0 0 16px rgba(239, 68, 68, 0.5);
+            background: rgba(244, 63, 94, 0.12);
+            border-color: rgba(244, 63, 94, 0.35);
+            color: var(--neon-red);
         }
 
         .dpad-stop:active, .dpad-stop.active {
-            background: var(--accent-red);
-            color: #fff;
+            background: var(--neon-red) !important;
+            color: #fff !important;
+            box-shadow: 0 0 25px var(--neon-red) !important;
         }
 
         /* Action Controls Group */
@@ -192,49 +231,43 @@
 
         .action-btn {
             flex: 1;
-            padding: 12px 10px;
-            border: 1px solid rgba(255, 255, 255, 0.15);
-            border-radius: 12px;
-            background: rgba(255, 255, 255, 0.06);
-            color: var(--text-primary);
+            padding: 12px;
+            border: 1px solid rgba(255, 255, 255, 0.14);
+            border-radius: 14px;
+            background: rgba(255, 255, 255, 0.05);
+            color: var(--text-main);
             font-size: 12px;
-            font-weight: 600;
+            font-weight: 700;
             cursor: pointer;
             display: flex;
             align-items: center;
             justify-content: center;
             gap: 6px;
-            transition: all 0.2s ease;
-        }
-
-        .action-btn:hover {
-            background: rgba(255, 255, 255, 0.15);
-            transform: translateY(-1px);
-        }
-
-        .action-btn:active, .action-btn.active {
-            transform: scale(0.96);
+            transition: all 0.15s ease;
         }
 
         .action-btn.auto-btn {
             border-color: rgba(16, 185, 129, 0.4);
-            color: var(--accent-green);
+            color: var(--neon-green);
         }
 
         .action-btn.stop-btn {
-            border-color: rgba(239, 68, 68, 0.4);
-            color: #ef4444;
-            background: rgba(239, 68, 68, 0.12);
+            border-color: rgba(244, 63, 94, 0.4);
+            color: var(--neon-red);
+            background: rgba(244, 63, 94, 0.1);
+        }
+
+        .action-btn:active {
+            transform: scale(0.95);
         }
 
         .serial-btn {
             width: 100%;
-            padding: 10px;
-            border: none;
-            border-radius: 12px;
-            background: rgba(255, 255, 255, 0.06);
-            border: 1px solid rgba(255, 255, 255, 0.15);
-            color: var(--text-secondary);
+            padding: 11px;
+            border-radius: 14px;
+            background: rgba(255, 255, 255, 0.04);
+            border: 1px solid rgba(255, 255, 255, 0.12);
+            color: var(--text-sub);
             font-size: 11px;
             font-weight: 600;
             cursor: pointer;
@@ -245,26 +278,21 @@
             transition: all 0.2s ease;
         }
 
-        .serial-btn:hover {
-            background: rgba(255, 255, 255, 0.12);
-            color: var(--text-primary);
-        }
-
         .key-guide {
             font-size: 10px;
-            color: var(--text-secondary);
+            color: var(--text-sub);
             text-align: center;
-            line-height: 1.4;
+            line-height: 1.5;
         }
 
         .key-guide strong {
-            color: var(--accent-cyan);
+            color: var(--neon-cyan);
         }
     </style>
 </head>
 <body>
 
-    <!-- Centered Controller Main UI Card -->
+    <!-- Centered Cyberpunk Gamepad Card -->
     <div class="controller-card">
 
         <!-- Title & Status -->
@@ -273,7 +301,7 @@
                 <circle cx="12" cy="12" r="10"></circle>
                 <path d="M12 8v8M8 12h8"></path>
             </svg>
-            OMNIWHEEL CONTROLLER
+            OMNI-WHEEL CONTROLLER
         </div>
 
         <div id="status-badge" class="status-badge">
@@ -281,18 +309,29 @@
             <span id="status-text">CONNECTING CLOUD...</span>
         </div>
 
-        <!-- Cross D-Pad Buttons -->
+        <!-- Speed Level Selection Bar -->
+        <div class="mode-bar">
+            <span class="mode-label">⚡ DRIVE SPEED</span>
+            <div class="speed-selector">
+                <button class="speed-pill" data-speed="1">1x</button>
+                <button class="speed-pill active" data-speed="3">2x</button>
+                <button class="speed-pill" data-speed="5">3x</button>
+                <button class="speed-pill" data-speed="7">MAX</button>
+            </div>
+        </div>
+
+        <!-- Cross D-Pad Buttons (Hold-To-Drive Mode) -->
         <div class="dpad-container">
             <div></div>
-            <button id="btn-up" class="dpad-btn" title="Forward (W / ▲)">▲<span>W (전진)</span></button>
+            <button id="btn-up" class="dpad-btn" title="Forward (Hold W)">▲<span>W (전진)</span></button>
             <div></div>
 
-            <button id="btn-left" class="dpad-btn" title="Left Strafe (A / ◀)">◀<span>A (좌)</span></button>
-            <button id="btn-stop" class="dpad-btn dpad-stop" title="Stop (X / Space)">🛑<span>STOP</span></button>
-            <button id="btn-right" class="dpad-btn" title="Right Strafe (D / ▶)">▶<span>D (우)</span></button>
+            <button id="btn-left" class="dpad-btn" title="Left Strafe (Hold A)">◀<span>A (좌)</span></button>
+            <button id="btn-stop" class="dpad-btn dpad-stop" title="Stop">🛑<span>STOP</span></button>
+            <button id="btn-right" class="dpad-btn" title="Right Strafe (Hold D)">▶<span>D (우)</span></button>
 
             <div></div>
-            <button id="btn-down" class="dpad-btn" title="Backward (S / ▼)">▼<span>S (후진)</span></button>
+            <button id="btn-down" class="dpad-btn" title="Backward (Hold S)">▼<span>S (후진)</span></button>
             <div></div>
         </div>
 
@@ -302,15 +341,15 @@
             <button id="btn-stop-all" class="action-btn stop-btn">⏹ Emergency [O]</button>
         </div>
 
-        <!-- Backup Serial USB Option -->
+        <!-- Backup USB Cable Connect -->
         <button id="btn-connect" class="serial-btn">
             🔌 USB Serial Connect (Local Backup)
         </button>
 
-        <!-- Keyboard Guide -->
+        <!-- Operating Instructions -->
         <div class="key-guide">
-            Keyboard: <strong>W A S D</strong> or <strong>Arrow Keys</strong> to Drive<br>
-            <strong>SpaceBar / X</strong> : Stop | <strong>I</strong> : Auto Roam
+            <strong>Hold-to-Drive Active</strong>: Move ONLY while holding button/key.<br>
+            Release button or key to Stop immediately.
         </div>
 
     </div>

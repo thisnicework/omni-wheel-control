@@ -2,12 +2,13 @@
  * arduino_odrive_relay.ino
  * 
  * Target MCU: Arduino Uno R4 WiFi
- * Purpose: Dual ODrive v3.6 Relay with Guaranteed HTTP Data Wait & Embedded Local Web UI.
+ * Purpose: Dual ODrive v3.6 Relay with 500ms Deadman's Switch Safety Watchdog & Cyberpunk UI.
  * 
- * Fixes for "Web button presses don't show up in Serial Monitor":
- *   1. 50ms Data Arrival Buffer: Waits for TCP HTTP payload bytes to arrive before reading, eliminating dropped web requests.
- *   2. Debug Logging: Prints EVERY incoming HTTP request ("🌐 [HTTP Rx] GET /w") directly to Serial Monitor.
- *   3. Embedded Web UI: Opening http://192.168.10.156/ in smartphone/PC renders responsive local controller buttons!
+ * Hold-to-Drive Safety System:
+ *   - Robot drives ONLY while 'W','A','S','D' buttons are held down.
+ *   - 500ms Deadman Watchdog: If no move command is re-sent within 500ms, automatically ramps target velocity to 0.
+ *   - Embedded Cyberpunk UI: http://192.168.10.156/ renders Hold-To-Drive touch buttons.
+ *   - Supports Render Cloud WSS MQTT (broker.hivemq.com:1883), Local Web (Port 80), & USB Serial.
  */
 
 #include <Arduino.h>
@@ -47,6 +48,10 @@ unsigned long lastMqttConnectAttemptMs = 0;
 // 3-Second ODrive Status Query Loop
 const unsigned long ODRIVE_STATUS_INTERVAL_MS = 3000;
 unsigned long lastODriveStatusMs = 0;
+
+// 500ms Deadman's Switch Safety Watchdog
+const unsigned long DEADMAN_TIMEOUT_MS = 500;
+unsigned long lastMoveCommandMs = 0;
 
 // System Motion State
 bool isAutoRoamEnabled = false;
@@ -105,8 +110,6 @@ void rearmODrives();
 void queryODriveStatus();
 void processSerial1();
 void processSoftSerial();
-void parseFrontLine(const char* line);
-void parseRearLine(const char* line);
 void handleWebControlInput();
 void executeCommand(char key, const char* source);
 void updateAutoRoamMotion();
@@ -122,7 +125,7 @@ void setup() {
     delay(1000);
 
     Serial.println("\n==================================================");
-    Serial.println("  🤖 Arduino Uno R4 WiFi - Web Command Listener   ");
+    Serial.println("  🤖 Arduino Uno R4 WiFi - Hold-to-Drive System  ");
     Serial.println("==================================================");
 
     // Initialize ODrives into Closed Loop Velocity Control
@@ -137,7 +140,7 @@ void setup() {
     connectToWiFi();
 
     Serial.println("==================================================");
-    Serial.println("▶️ Listening for Web & MQTT Commands...");
+    Serial.println("▶️ Ready! Hold-To-Drive Mode (500ms Safety Watchdog).");
     Serial.println("==================================================\n");
 }
 
@@ -153,15 +156,21 @@ void loop() {
     // 2. Real-Time USB Serial Backup Commands
     handleWebControlInput();
 
-    // 3. 20Hz CONTINUOUS VELOCITY CONTROL LOOP
+    // 3. 500ms Deadman Watchdog: Auto-stop if no move command received recently
+    if (!isAutoRoamEnabled && (currentMs - lastMoveCommandMs > DEADMAN_TIMEOUT_MS) && (targetVx != 0.0f || targetVy != 0.0f)) {
+        targetVx = 0.0f;
+        targetVy = 0.0f;
+    }
+
+    // 4. 20Hz CONTINUOUS VELOCITY CONTROL LOOP
     if (currentMs - lastRoamMs >= ROAM_INTERVAL_MS) {
         lastRoamMs = currentMs;
         if (isAutoRoamEnabled) {
             updateAutoRoamMotion();
         } else {
             // Smoothly ramp currentVx, currentVy towards targetVx, targetVy
-            currentVx += (targetVx - currentVx) * 0.40f;
-            currentVy += (targetVy - currentVy) * 0.40f;
+            currentVx += (targetVx - currentVx) * 0.45f;
+            currentVy += (targetVy - currentVy) * 0.45f;
 
             if (abs(currentVx) > 0.02f || abs(currentVy) > 0.02f || abs(targetVx) > 0.02f || abs(targetVy) > 0.02f) {
                 moveRobotVelocities(currentVx, currentVy);
@@ -169,13 +178,13 @@ void loop() {
         }
     }
 
-    // 4. 3-Second Live ODrive Status Query Loop
+    // 5. 3-Second Live ODrive Status Query Loop
     if (currentMs - lastODriveStatusMs >= ODRIVE_STATUS_INTERVAL_MS) {
         lastODriveStatusMs = currentMs;
         queryODriveStatus();
     }
 
-    // 5. Asynchronously read incoming ODrive responses
+    // 6. Asynchronously read incoming ODrive responses
     processSerial1();
     processSoftSerial();
 }
@@ -263,7 +272,6 @@ void handleLocalWebClients() {
     WiFiClient client = localServer.available();
     if (!client) return;
 
-    // Wait up to 50ms for TCP payload bytes to arrive
     unsigned long startWait = millis();
     while (!client.available() && (millis() - startWait < 50)) {
         delay(1);
@@ -290,16 +298,17 @@ void handleLocalWebClients() {
             }
         }
 
-        // Fast CORS-Enabled Response with HTML Buttons
+        // Fast Response with Hold-To-Drive HTML Buttons
         client.println("HTTP/1.1 200 OK");
         client.println("Content-Type: text/html");
         client.println("Access-Control-Allow-Origin: *");
         client.println("Connection: close\r\n");
-        client.println("<!DOCTYPE html><html><head><meta name='viewport' content='width=device-width,initial-scale=1'><style>body{background:#06090b;color:#06b6d4;font-family:sans-serif;text-align:center;padding-top:20px}button{padding:20px;font-size:24px;margin:8px;border-radius:14px;border:none;background:#10b981;color:#fff;width:120px;height:80px}.stop{background:#ef4444}</style></head><body>");
-        client.println("<h2>Omni-Wheel Local Controller</h2>");
-        client.println("<div><a href='/w'><button>▲<br>W</button></a></div>");
-        client.println("<div><a href='/a'><button>◀<br>A</button></a> <a href='/x'><button class='stop'>🛑<br>STOP</button></a> <a href='/d'><button>▶<br>D</button></a></div>");
-        client.println("<div><a href='/s'><button>▼<br>S</button></a></div>");
+        client.println("<!DOCTYPE html><html><head><meta name='viewport' content='width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no'><style>body{background:#06090b;color:#06b6d4;font-family:sans-serif;text-align:center;padding-top:20px;user-select:none;touch-action:none}button{padding:20px;font-size:24px;margin:8px;border-radius:18px;border:1px solid rgba(6,182,212,0.4);background:rgba(255,255,255,0.06);color:#fff;width:120px;height:80px;box-shadow:0 4px 12px rgba(0,0,0,0.4)}button:active{background:#06b6d4;color:#000;box-shadow:0 0 20px #06b6d4}.stop{background:rgba(244,63,94,0.2);border-color:#f43f5e;color:#f43f5e}</style></head><body>");
+        client.println("<h2>Omni-Wheel Hold Controller</h2>");
+        client.println("<div><button onmousedown=\"fetch('/w')\" onmouseup=\"fetch('/x')\" ontouchstart=\"fetch('/w')\" ontouchend=\"fetch('/x')\">▲<br>W</button></div>");
+        client.println("<div><button onmousedown=\"fetch('/a')\" onmouseup=\"fetch('/x')\" ontouchstart=\"fetch('/a')\" ontouchend=\"fetch('/x')\">◀<br>A</button> <button class='stop' onclick=\"fetch('/x')\">🛑<br>STOP</button> <button onmousedown=\"fetch('/d')\" onmouseup=\"fetch('/x')\" ontouchstart=\"fetch('/d')\" ontouchend=\"fetch('/x')\">▶<br>D</button></div>");
+        client.println("<div><button onmousedown=\"fetch('/s')\" onmouseup=\"fetch('/x')\" ontouchstart=\"fetch('/s')\" ontouchend=\"fetch('/x')\">▼<br>S</button></div>");
+        client.println("<p style='font-size:12px;color:#64748b;margin-top:15px'>Hold button to move. Release to stop.</p>");
         client.println("</body></html>");
         client.flush();
     }
@@ -326,11 +335,12 @@ void rearmODrives() {
 }
 
 /**
- * Central Command Executor - Displays EVERY Web & USB Received Command!
+ * Central Command Executor - Hold-To-Drive Timer Tracking
  */
 void executeCommand(char key, const char* source) {
     if (key == 'w') {
         isAutoRoamEnabled = false;
+        lastMoveCommandMs = millis();
         rearmODrives();
         targetVx = 0.0f;
         targetVy = currentDriveSpeed;
@@ -339,6 +349,7 @@ void executeCommand(char key, const char* source) {
     }
     else if (key == 's') {
         isAutoRoamEnabled = false;
+        lastMoveCommandMs = millis();
         rearmODrives();
         targetVx = 0.0f;
         targetVy = -currentDriveSpeed;
@@ -347,6 +358,7 @@ void executeCommand(char key, const char* source) {
     }
     else if (key == 'a') {
         isAutoRoamEnabled = false;
+        lastMoveCommandMs = millis();
         rearmODrives();
         targetVx = -currentDriveSpeed;
         targetVy = 0.0f;
@@ -355,6 +367,7 @@ void executeCommand(char key, const char* source) {
     }
     else if (key == 'd') {
         isAutoRoamEnabled = false;
+        lastMoveCommandMs = millis();
         rearmODrives();
         targetVx = currentDriveSpeed;
         targetVy = 0.0f;
