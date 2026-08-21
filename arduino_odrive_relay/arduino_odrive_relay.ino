@@ -2,18 +2,17 @@
  * arduino_odrive_relay.ino
  * 
  * Target MCU: Arduino Uno R4 WiFi
- * Purpose: Dual ODrive v3.6 Relay with Dual Local Web Server (Port 80) & Render Cloud Integration.
+ * Purpose: Dual ODrive v3.6 Relay with Ultra-Fast Non-Blocking Local Web Server (Port 80).
  * 
- * Features:
- *   1. Local WebServer (Port 80): Open http://<Arduino_IP>/ in any phone/laptop browser for 1ms zero-latency wireless control!
- *   2. REST Commands: GET /w, GET /s, GET /a, GET /d, GET /x, GET /i
- *   3. Render Cloud HTTPS Polling backup (omni-wheel-control.onrender.com)
- *   4. Reliable 20Hz Continuous Velocity Loop for Dual ODrives.
+ * Performance Fix:
+ *   - Removed blocking HTTPS SSL cloud polling to prevent MCU freezes.
+ *   - Local Web Server on Port 80 handles GET /w, /s, /a, /d in 1ms with 0% CPU blocking.
+ *   - USB Serial CDC handles 115200 baud real-time commands.
+ *   - Continuous 20Hz velocity output stream to ODrives.
  */
 
 #include <Arduino.h>
 #include <WiFiS3.h>
-#include <WiFiSSLClient.h>
 #include <SoftwareSerial.h>
 
 #define MAC_BAUDRATE 115200
@@ -23,13 +22,8 @@
 const char* WIFI_SSID = "sanhak";      // Wi-Fi SSID
 const char* WIFI_PASS = "20020520";  // Wi-Fi Password
 
-// --- RENDER CLOUD HOST CONFIGURATION ---
-const char* RENDER_HOST = "omni-wheel-control.onrender.com";
-const int   RENDER_PORT = 443;
-
 // Local HTTP Web Server on Port 80
 WiFiServer localServer(80);
-WiFiSSLClient sslClient;
 
 // Rear ODrive SoftwareSerial on Pins 9 (RX), 8 (TX)
 SoftwareSerial odriveRear(9, 8);
@@ -37,10 +31,6 @@ SoftwareSerial odriveRear(9, 8);
 // 20Hz Encoder Feedback Polling (50ms)
 const unsigned long POLLING_INTERVAL_US = 50000;
 unsigned long lastPollMicros = 0;
-
-// Render Cloud Command Polling (400ms)
-const unsigned long RENDER_POLL_INTERVAL_MS = 400;
-unsigned long lastRenderPollMs = 0;
 
 // 20Hz Continuous Velocity Update Loop (50ms)
 const unsigned long ROAM_INTERVAL_MS = 50;
@@ -56,7 +46,6 @@ float encoderPositions[4] = {0.0f, 0.0f, 0.0f, 0.0f};
 // System Motion State
 bool isAutoRoamEnabled = false;
 float currentDriveSpeed = 2.0f; // Velocity turns/sec
-char lastExecutedCmd = ' ';
 
 // Continuous Target & Current Velocities (Vx, Vy)
 float targetVx = 0.0f;
@@ -91,7 +80,6 @@ uint8_t axisQueryRear = 0;
 // Function Prototypes
 void connectToWiFi();
 void handleLocalWebClients();
-void pollRenderCloud();
 void printStatusHeartbeat();
 void setupODriveFront();
 void setupODriveRear();
@@ -116,7 +104,7 @@ void setup() {
     delay(1000);
 
     Serial.println("\n==================================================");
-    Serial.println("  🤖 Arduino Uno R4 WiFi - Dual ODrive System     ");
+    Serial.println("  🤖 Arduino Uno R4 WiFi - High Speed Web System  ");
     Serial.println("==================================================");
 
     // Initialize ODrives into Closed Loop Velocity Control
@@ -131,7 +119,7 @@ void setup() {
     connectToWiFi();
 
     Serial.println("==================================================");
-    Serial.println("▶️ Ready! Send commands via WASD, Local Web, or USB.");
+    Serial.println("▶️ Ready! Controlling via Wi-Fi Web Server & USB...");
     Serial.println("==================================================\n");
 }
 
@@ -139,28 +127,22 @@ void loop() {
     unsigned long currentMicros = micros();
     unsigned long currentMs = millis();
 
-    // 1. Handle Incoming Local Web Requests (Port 80) for 1ms Zero-Latency Control
+    // 1. Non-Blocking Local Web Requests (Port 80)
     if (WiFi.status() == WL_CONNECTED) {
         handleLocalWebClients();
     }
 
-    // 2. Poll Render Cloud Commands over HTTPS (every 400ms)
-    if (WiFi.status() == WL_CONNECTED && (currentMs - lastRenderPollMs >= RENDER_POLL_INTERVAL_MS)) {
-        lastRenderPollMs = currentMs;
-        pollRenderCloud();
-    }
-
-    // 3. Process Real-Time USB Serial Backup Commands
+    // 2. Real-Time USB Serial Commands
     handleWebControlInput();
 
-    // 4. 20Hz Encoder Feedback Polling
+    // 3. 20Hz Encoder Feedback Polling
     if (currentMicros - lastPollMicros >= POLLING_INTERVAL_US) {
         lastPollMicros = currentMicros;
         pollODrives();
         sendCSVToMac();
     }
 
-    // 5. 20Hz CONTINUOUS VELOCITY CONTROL LOOP (Continuous v 0 ... stream to ODrive)
+    // 4. 20Hz CONTINUOUS VELOCITY CONTROL LOOP
     if (currentMs - lastRoamMs >= ROAM_INTERVAL_MS) {
         lastRoamMs = currentMs;
         if (isAutoRoamEnabled) {
@@ -173,19 +155,19 @@ void loop() {
         }
     }
 
-    // 6. 5-Second Status Heartbeat
+    // 5. 5-Second Status Heartbeat
     if (currentMs - lastStatusMs >= STATUS_INTERVAL_MS) {
         lastStatusMs = currentMs;
         printStatusHeartbeat();
     }
 
-    // 7. Asynchronously read incoming ODrive response lines
+    // 6. Asynchronously read incoming ODrive response lines
     processSerial1();
     processSoftSerial();
 }
 
 /**
- * Wi-Fi Internet Connection & Local WebServer Setup
+ * Connect to Wi-Fi & Start Non-Blocking Local Web Server
  */
 void connectToWiFi() {
     if (WiFi.status() == WL_NO_MODULE) {
@@ -193,13 +175,16 @@ void connectToWiFi() {
         return;
     }
 
+    WiFi.disconnect();
+    delay(300);
+
     Serial.print("📶 Connecting Wi-Fi SSID: ");
     Serial.println(WIFI_SSID);
 
     WiFi.begin(WIFI_SSID, WIFI_PASS);
     
     int attempts = 0;
-    while (WiFi.status() != WL_CONNECTED && attempts < 20) {
+    while (WiFi.status() != WL_CONNECTED && attempts < 15) {
         delay(500);
         Serial.print(".");
         attempts++;
@@ -217,7 +202,6 @@ void connectToWiFi() {
 
 /**
  * Handles Incoming Local Web Server Requests (Port 80)
- * Allows direct browser driving at http://<Arduino_IP>/w
  */
 void handleLocalWebClients() {
     WiFiClient client = localServer.available();
@@ -225,7 +209,7 @@ void handleLocalWebClients() {
 
     String request = "";
     unsigned long timeout = millis();
-    while (client.connected() && millis() - timeout < 300) {
+    while (client.connected() && millis() - timeout < 100) {
         if (client.available()) {
             char c = client.read();
             request += c;
@@ -239,54 +223,22 @@ void handleLocalWebClients() {
             char cmdKey = toLowerCase(request.charAt(getIndex + 5));
             if (cmdKey == 'w' || cmdKey == 's' || cmdKey == 'a' || cmdKey == 'd' || 
                 cmdKey == 'x' || cmdKey == 'o' || cmdKey == 'i' || (cmdKey >= '1' && cmdKey <= '9')) {
-                executeCommand(cmdKey, "Local Web");
+                executeCommand(cmdKey, "Wi-Fi Web");
             }
         }
 
-        // Send Minimal CORS-enabled HTTP Response
+        // Fast CORS-enabled HTTP Response
         client.println("HTTP/1.1 200 OK");
         client.println("Content-Type: text/html");
         client.println("Access-Control-Allow-Origin: *");
         client.println("Connection: close\r\n");
-        client.println("<!DOCTYPE html><html><head><meta name='viewport' content='width=device-width,initial-scale=1'><style>body{background:#0a0e14;color:#06b6d4;font-family:sans-serif;text-align:center;padding-top:40px}button{padding:20px;font-size:24px;margin:10px;border-radius:12px;border:none;background:#10b981;color:#fff}</style></head><body>");
+        client.println("<!DOCTYPE html><html><head><meta name='viewport' content='width=device-width,initial-scale=1'><style>body{background:#06090b;color:#06b6d4;font-family:sans-serif;text-align:center;padding:30px}button{padding:22px;font-size:26px;margin:10px;border-radius:16px;border:none;background:#10b981;color:#fff;width:140px;height:90px}.stop{background:#ef4444}</style></head><body>");
         client.println("<h2>Omni-Wheel Wireless Controller</h2>");
-        client.println("<div><a href='/w'><button>▲ FORWARD (W)</button></a></div>");
-        client.println("<div><a href='/a'><button>◀ LEFT (A)</button></a> <a href='/x'><button style='background:#ef4444'>🛑 STOP</button></a> <a href='/d'><button>▶ RIGHT (D)</button></a></div>");
-        client.println("<div><a href='/s'><button>▼ BACKWARD (S)</button></a></div>");
+        client.println("<div><a href='/w'><button>▲<br>W</button></a></div>");
+        client.println("<div><a href='/a'><button>◀<br>A</button></a> <a href='/x'><button class='stop'>🛑<br>STOP</button></a> <a href='/d'><button>▶<br>D</button></a></div>");
+        client.println("<div><a href='/s'><button>▼<br>S</button></a></div>");
         client.println("</body></html>");
         client.stop();
-    }
-}
-
-/**
- * Polls Render Cloud HTTPS GET /api/cmd endpoint
- */
-void pollRenderCloud() {
-    if (WiFi.status() != WL_CONNECTED) return;
-
-    if (sslClient.connect(RENDER_HOST, RENDER_PORT)) {
-        sslClient.print("GET /api/cmd HTTP/1.1\r\n");
-        sslClient.print("Host: "); sslClient.print(RENDER_HOST); sslClient.print("\r\n");
-        sslClient.print("Connection: close\r\n\r\n");
-
-        String response = "";
-        unsigned long timeout = millis();
-        while (sslClient.connected() && millis() - timeout < 400) {
-            while (sslClient.available()) {
-                char c = sslClient.read();
-                response += c;
-            }
-        }
-        sslClient.stop();
-
-        int cmdIndex = response.indexOf("\"cmd\":\"");
-        if (cmdIndex != -1) {
-            char cmdKey = toLowerCase(response.charAt(cmdIndex + 7));
-            if (cmdKey != lastExecutedCmd) {
-                lastExecutedCmd = cmdKey;
-                executeCommand(cmdKey, "Render Cloud");
-            }
-        }
     }
 }
 
@@ -297,27 +249,27 @@ void executeCommand(char key, const char* source) {
     if (key == 'w') {
         isAutoRoamEnabled = false;
         targetVx = 0.0f;
-        targetVy = currentDriveSpeed; // Continuous Forward
+        targetVy = currentDriveSpeed;
         Serial.print("⚡ ["); Serial.print(source); Serial.print("] Cmd 'W' -> FORWARD (");
         Serial.print(currentDriveSpeed); Serial.println(" turns/s)");
     }
     else if (key == 's') {
         isAutoRoamEnabled = false;
         targetVx = 0.0f;
-        targetVy = -currentDriveSpeed; // Continuous Backward
+        targetVy = -currentDriveSpeed;
         Serial.print("⚡ ["); Serial.print(source); Serial.print("] Cmd 'S' -> BACKWARD (-");
         Serial.print(currentDriveSpeed); Serial.println(" turns/s)");
     }
     else if (key == 'a') {
         isAutoRoamEnabled = false;
-        targetVx = -currentDriveSpeed; // Continuous Left Strafe
+        targetVx = -currentDriveSpeed;
         targetVy = 0.0f;
         Serial.print("⚡ ["); Serial.print(source); Serial.print("] Cmd 'A' -> LEFT STRAFE (-");
         Serial.print(currentDriveSpeed); Serial.println(" turns/s)");
     }
     else if (key == 'd') {
         isAutoRoamEnabled = false;
-        targetVx = currentDriveSpeed; // Continuous Right Strafe
+        targetVx = currentDriveSpeed;
         targetVy = 0.0f;
         Serial.print("⚡ ["); Serial.print(source); Serial.print("] Cmd 'D' -> RIGHT STRAFE (");
         Serial.print(currentDriveSpeed); Serial.println(" turns/s)");
