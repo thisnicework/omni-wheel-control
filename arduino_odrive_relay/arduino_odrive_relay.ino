@@ -2,12 +2,13 @@
  * arduino_odrive_relay.ino
  * 
  * Target MCU: Arduino Uno R4 WiFi
- * Purpose: Dual ODrive v3.6 Relay with Continuous Arming & Zero Transition Delay.
+ * Purpose: Dual ODrive v3.6 Relay with Revived USB Serial Monitor & Web Control.
  * 
- * Fix for "Commands received fine but motor doesn't move":
- *   - Continuous Closed-Loop State 8: ODrives remain in State 8 at velocity 0 (v 0 0) when stopped.
- *   - Eliminates State 1 -> State 8 state machine transition delay on button press.
- *   - Allows velocity commands (v 0 6.0) to take effect INSTANTLY on 'W', 'A', 'S', 'D' press.
+ * USB Serial Control Feature:
+ *   - Type 'w', 's', 'a', 'd' in Serial Monitor + Enter: Drives continuously until 'x' is typed!
+ *   - Type 'x' in Serial Monitor + Enter: Instantly stops all motors.
+ *   - Type '1'..'9' in Serial Monitor + Enter: Adjusts velocity speed level on the fly.
+ *   - Type raw ODrive commands (e.g. 'v 0 8.0', 'r vbus_voltage'): Passthrough directly to ODrives.
  *   - Supports Mac Local Relay Server (192.168.10.140:8000), Cloud MQTT, & USB Serial.
  */
 
@@ -62,6 +63,7 @@ unsigned long lastMoveCommandMs = 0;
 // System Motion State
 bool isAutoRoamEnabled = false;
 bool isArmed = false;
+bool isSerialControlMode = false;
 float currentDriveSpeed = 6.0f; // Velocity turns/sec (Default 6.0 rps = 360 RPM for high torque)
 
 // Continuous Target & Current Velocities (Vx, Vy)
@@ -136,7 +138,7 @@ void setup() {
     delay(1000);
 
     Serial.println("\n==================================================");
-    Serial.println("  🤖 Arduino Uno R4 WiFi - Zero Delay Drive Engine ");
+    Serial.println("  🤖 Arduino Uno R4 WiFi - Dual Web & Serial Mode ");
     Serial.println("==================================================");
 
     // Initialize ODrives into Closed Loop Velocity Control once at boot
@@ -153,6 +155,7 @@ void setup() {
     Serial.println("==================================================");
     Serial.print("▶️ Polling Mac Local Server: http://");
     Serial.print(MAC_SERVER_IP); Serial.print(":"); Serial.println(MAC_SERVER_PORT);
+    Serial.println("▶️ Serial Input Control Active: Type 'w','s','a','d','x' + Enter");
     Serial.println("==================================================\n");
 }
 
@@ -165,11 +168,11 @@ void loop() {
         pollCloudMQTT();
     }
 
-    // 2. Real-Time USB Serial Backup Commands
+    // 2. Real-Time USB Serial Monitor Control & Raw ODrive Command Passthrough
     handleWebControlInput();
 
-    // 3. 500ms Deadman Watchdog: Auto-stop if no move command received recently
-    if (!isAutoRoamEnabled && (currentMs - lastMoveCommandMs > DEADMAN_TIMEOUT_MS) && (targetVx != 0.0f || targetVy != 0.0f)) {
+    // 3. 500ms Deadman Watchdog (Web mode only): Auto-stop if no heartbeat received
+    if (!isAutoRoamEnabled && !isSerialControlMode && (currentMs - lastMoveCommandMs > DEADMAN_TIMEOUT_MS) && (targetVx != 0.0f || targetVy != 0.0f)) {
         stopAllMotors();
     }
 
@@ -198,6 +201,33 @@ void loop() {
     // 6. Asynchronously read incoming ODrive responses
     processSerial1();
     processSoftSerial();
+}
+
+/**
+ * Handles Incoming Input from USB Serial Monitor Input Box
+ */
+void handleWebControlInput() {
+    if (Serial.available() > 0) {
+        String line = Serial.readStringUntil('\n');
+        line.trim();
+        if (line.length() == 1) {
+            char key = toLowerCase(line.charAt(0));
+            if (key == 'w' || key == 's' || key == 'a' || key == 'd') {
+                isSerialControlMode = true;
+                executeCommand(key, "USB Serial");
+            } else if (key == 'x' || key == 'o') {
+                isSerialControlMode = false;
+                executeCommand(key, "USB Serial");
+            } else {
+                executeCommand(key, "USB Serial");
+            }
+        } else if (line.length() > 1) {
+            Serial.print("🔧 [ODrive Passthrough] -> ");
+            Serial.println(line);
+            Serial1.println(line);
+            odriveRear.println(line);
+        }
+    }
 }
 
 /**
@@ -234,6 +264,7 @@ void pollMacServer() {
                     char cmdKey = toLowerCase(payload.charAt(0));
                     if (cmdKey == 'w' || cmdKey == 's' || cmdKey == 'a' || cmdKey == 'd' || 
                         cmdKey == 'x' || cmdKey == 'o' || cmdKey == 'i' || (cmdKey >= '1' && cmdKey <= '9')) {
+                        isSerialControlMode = false;
                         executeCommand(cmdKey, "Mac Local Server");
                     }
                 }
@@ -265,6 +296,7 @@ void pollCloudMQTT() {
         char cmdKey = toLowerCase(c);
         if (cmdKey == 'w' || cmdKey == 's' || cmdKey == 'a' || cmdKey == 'd' || 
             cmdKey == 'x' || cmdKey == 'o' || cmdKey == 'i' || (cmdKey >= '1' && cmdKey <= '9')) {
+            isSerialControlMode = false;
             executeCommand(cmdKey, "Render Cloud MQTT");
         }
     }
@@ -453,7 +485,7 @@ void stopAllMotors() {
     targetVy = 0.0f;
     currentVx = 0.0f;
     currentVy = 0.0f;
-    // Keep isArmed = true so ODrive stays in State 8 ready for instant movement!
+    isSerialControlMode = false;
 
     Serial1.println("v 0 0");
     Serial1.println("v 1 0");
@@ -489,58 +521,6 @@ void setupODriveRear() {
     odriveRear.println("w axis1.controller.config.control_mode 2"); delay(30);
     odriveRear.println("w axis1.controller.config.input_mode 1"); delay(30);
     odriveRear.println("w axis1.requested_state 8"); delay(30);
-}
-
-void handleWebControlInput() {
-    if (Serial.available() > 0) {
-        String line = Serial.readStringUntil('\n');
-        line.trim();
-        if (line.length() == 1) {
-            char key = toLowerCase(line.charAt(0));
-            executeCommand(key, "USB Serial");
-        } else if (line.length() > 1) {
-            Serial.print("🔧 [ODrive Passthrough] -> ");
-            Serial.println(line);
-            Serial1.println(line);
-            odriveRear.println(line);
-        }
-    }
-}
-
-void updateAutoRoamMotion() {
-    unsigned long now = millis();
-    unsigned long elapsed = now - stateStartTime;
-
-    if (elapsed > stateDuration) {
-        stateStartTime = now;
-
-        if (currentState == STATE_GENTLE_DASH) {
-            currentState = STATE_BRIEF_REST;
-            stateDuration = 800;
-            fixedVx = 0.0f;
-            fixedVy = 0.0f;
-        } else {
-            currentState = STATE_GENTLE_DASH;
-            stateDuration = random(1200, 2500);
-            
-            float angle = (random(0, 360) * DEG_TO_RAD);
-            float speed = 1.0f + (random(0, 10) / 10.0f);
-            
-            fixedVx = cos(angle) * speed;
-            fixedVy = sin(angle) * speed;
-        }
-    }
-
-    if (currentState == STATE_GENTLE_DASH) {
-        currentVx += (fixedVx - currentVx) * 0.25f;
-        currentVy += (fixedVy - currentVy) * 0.25f;
-    } else {
-        float breath = sin(now * 0.002f) * 0.10f;
-        currentVx += (breath - currentVx) * 0.25f;
-        currentVy += (breath - currentVy) * 0.25f;
-    }
-
-    moveRobotVelocities(currentVx, currentVy);
 }
 
 bool isCleanIntegerString(const char* str) {
