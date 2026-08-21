@@ -2,11 +2,13 @@
  * arduino_odrive_relay.ino
  * 
  * Target MCU: Arduino Uno R4 WiFi
- * Purpose: Dual ODrive v3.6 Relay with Critical HTTP Space-Stop Bug Fix.
+ * Purpose: Dual ODrive v3.6 Relay with 3-Second Live ODrive Health Monitor (State & Error Logging).
  * 
- * Bug Fix:
- *   - Fixed bug in handleLocalWebClients() where "GET / HTTP/1.1" extracted space ' ', which triggered stopAllMotors() instantly!
- *   - Motors now run 100% smoothly and continuously on 'W', 'A', 'S', 'D' without immediate accidental stopping.
+ * Live Monitoring Features:
+ *   - Every 3 seconds, queries both Front & Rear ODrives for axis0.current_state and axis0.error.
+ *   - Prints live status directly to Arduino Serial Monitor:
+ *       "📊 [FRONT ODRIVE] State: 8 (CLOSED_LOOP) | Error: 0x0"
+ *       "📊 [REAR ODRIVE]  State: 8 (CLOSED_LOOP) | Error: 0x0"
  *   - Supports Render Cloud WSS MQTT (broker.hivemq.com:1883), Local Web (Port 80), & USB Serial.
  */
 
@@ -44,6 +46,10 @@ unsigned long lastRoamMs = 0;
 const unsigned long MQTT_RECONNECT_INTERVAL_MS = 3000;
 unsigned long lastMqttConnectAttemptMs = 0;
 
+// 3-Second ODrive Status Query Loop
+const unsigned long ODRIVE_STATUS_INTERVAL_MS = 3000;
+unsigned long lastODriveStatusMs = 0;
+
 // System Motion State
 bool isAutoRoamEnabled = false;
 float currentDriveSpeed = 4.0f; // Velocity turns/sec (Default 4.0 rps = 240 RPM)
@@ -75,6 +81,22 @@ size_t rxIndex1 = 0;
 char rxBufferRear[RX_BUFFER_SIZE];
 size_t rxIndexRear = 0;
 
+// ODrive Diagnostic Storage
+int frontState = -1;
+uint32_t frontErr = 0;
+int rearState = -1;
+uint32_t rearErr = 0;
+
+enum QueryStep {
+    Q_NONE,
+    Q_FRONT_STATE,
+    Q_FRONT_ERR,
+    Q_REAR_STATE,
+    Q_REAR_ERR
+};
+QueryStep frontQuery = Q_NONE;
+QueryStep rearQuery = Q_NONE;
+
 // Function Prototypes
 void connectToWiFi();
 void pollCloudMQTT();
@@ -82,8 +104,11 @@ void handleLocalWebClients();
 void setupODriveFront();
 void setupODriveRear();
 void rearmODrives();
+void queryODriveStatus();
 void processSerial1();
 void processSoftSerial();
+void parseFrontLine(const char* line);
+void parseRearLine(const char* line);
 void handleWebControlInput();
 void executeCommand(char key, const char* source);
 void updateAutoRoamMotion();
@@ -99,7 +124,7 @@ void setup() {
     delay(1000);
 
     Serial.println("\n==================================================");
-    Serial.println("  🤖 Arduino Uno R4 WiFi - Continuous Drive System");
+    Serial.println("  🤖 Arduino Uno R4 WiFi - ODrive Monitor System ");
     Serial.println("==================================================");
 
     // Initialize ODrives into Closed Loop Velocity Control
@@ -114,7 +139,7 @@ void setup() {
     connectToWiFi();
 
     Serial.println("==================================================");
-    Serial.println("▶️ Ready! Controlling ODrives (HTTP Space-Stop Bug Fixed).");
+    Serial.println("▶️ Monitoring ODrive Health Every 3 Seconds...");
     Serial.println("==================================================\n");
 }
 
@@ -140,16 +165,34 @@ void loop() {
             currentVx += (targetVx - currentVx) * 0.40f;
             currentVy += (targetVy - currentVy) * 0.40f;
 
-            // Send UART velocities continuously to ODrives
             if (abs(currentVx) > 0.02f || abs(currentVy) > 0.02f || abs(targetVx) > 0.02f || abs(targetVy) > 0.02f) {
                 moveRobotVelocities(currentVx, currentVy);
             }
         }
     }
 
-    // 4. Asynchronously read incoming ODrive responses (if any)
+    // 4. 3-Second Live ODrive Status Query Loop
+    if (currentMs - lastODriveStatusMs >= ODRIVE_STATUS_INTERVAL_MS) {
+        lastODriveStatusMs = currentMs;
+        queryODriveStatus();
+    }
+
+    // 5. Asynchronously read incoming ODrive responses
     processSerial1();
     processSoftSerial();
+}
+
+/**
+ * Polls Front & Rear ODrive state & error status
+ */
+void queryODriveStatus() {
+    // Query Front ODrive
+    frontQuery = Q_FRONT_STATE;
+    Serial1.println("r axis0.current_state");
+    
+    // Query Rear ODrive
+    rearQuery = Q_REAR_STATE;
+    odriveRear.println("r axis0.current_state");
 }
 
 /**
@@ -235,7 +278,6 @@ void handleLocalWebClients() {
             path.trim();
             if (path.length() > 0) {
                 char cmdKey = toLowerCase(path.charAt(0));
-                // Only process valid command characters (ignoring space ' ' from GET / HTTP/1.1)
                 if (cmdKey == 'w' || cmdKey == 's' || cmdKey == 'a' || cmdKey == 'd' || 
                     cmdKey == 'x' || cmdKey == 'o' || cmdKey == 'i' || (cmdKey >= '1' && cmdKey <= '9')) {
                     executeCommand(cmdKey, "Wi-Fi Web");
@@ -447,9 +489,22 @@ void processSerial1() {
         if (c == '\n' || c == '\r') {
             if (rxIndex1 > 0) {
                 rxBuffer1[rxIndex1] = '\0';
-                if (rxBuffer1[0] != '0' && rxBuffer1[0] != '1' && rxBuffer1[0] != 'v' && rxBuffer1[0] != 'V') {
-                    Serial.print("💬 [ODrive Front Response] ");
-                    Serial.println(rxBuffer1);
+                if (rxBuffer1[0] != 'r' && rxBuffer1[0] != 'v' && rxBuffer1[0] != 'w' && rxBuffer1[0] != 'c') {
+                    if (frontQuery == Q_FRONT_STATE) {
+                        frontState = atoi(rxBuffer1);
+                        frontQuery = Q_FRONT_ERR;
+                        Serial1.println("r axis0.error");
+                    } else if (frontQuery == Q_FRONT_ERR) {
+                        frontErr = (uint32_t)strtoul(rxBuffer1, NULL, 10);
+                        frontQuery = Q_NONE;
+                        Serial.print("📊 [FRONT ODRIVE] Axis0 State: ");
+                        Serial.print(frontState == 8 ? "8 (CLOSED_LOOP)" : (String(frontState) + " (IDLE/ERR)"));
+                        Serial.print(" | Error: 0x");
+                        Serial.println(frontErr, HEX);
+                    } else {
+                        Serial.print("💬 [ODrive Front Response] ");
+                        Serial.println(rxBuffer1);
+                    }
                 }
                 rxIndex1 = 0;
             }
@@ -469,9 +524,22 @@ void processSoftSerial() {
         if (c == '\n' || c == '\r') {
             if (rxIndexRear > 0) {
                 rxBufferRear[rxIndexRear] = '\0';
-                if (rxBufferRear[0] != '0' && rxBufferRear[0] != '1' && rxBufferRear[0] != 'v' && rxBufferRear[0] != 'V') {
-                    Serial.print("💬 [ODrive Rear Response] ");
-                    Serial.println(rxBufferRear);
+                if (rxBufferRear[0] != 'r' && rxBufferRear[0] != 'v' && rxBufferRear[0] != 'w' && rxBufferRear[0] != 'c') {
+                    if (rearQuery == Q_REAR_STATE) {
+                        rearState = atoi(rxBufferRear);
+                        rearQuery = Q_REAR_ERR;
+                        odriveRear.println("r axis0.error");
+                    } else if (rearQuery == Q_REAR_ERR) {
+                        rearErr = (uint32_t)strtoul(rxBufferRear, NULL, 10);
+                        rearQuery = Q_NONE;
+                        Serial.print("📊 [REAR ODRIVE]  Axis0 State: ");
+                        Serial.print(rearState == 8 ? "8 (CLOSED_LOOP)" : (String(rearState) + " (IDLE/ERR)"));
+                        Serial.print(" | Error: 0x");
+                        Serial.println(rearErr, HEX);
+                    } else {
+                        Serial.print("💬 [ODrive Rear Response] ");
+                        Serial.println(rxBufferRear);
+                    }
                 }
                 rxIndexRear = 0;
             }
