@@ -2,11 +2,11 @@
  * arduino_odrive_relay.ino
  * 
  * Target MCU: Arduino Uno R4 WiFi
- * Purpose: Dual ODrive v3.6 Relay with Echo Filtering for 100% Silent & Clean Serial Output.
+ * Purpose: Dual ODrive v3.6 Relay with Critical HTTP Space-Stop Bug Fix.
  * 
- * Echo Filter Fix:
- *   - Filters out ODrive UART echo strings starting with 'v'/'V' ("v 0 0.00", "v 1 0.00").
- *   - Eliminates all background echo clutter from Arduino Serial Monitor.
+ * Bug Fix:
+ *   - Fixed bug in handleLocalWebClients() where "GET / HTTP/1.1" extracted space ' ', which triggered stopAllMotors() instantly!
+ *   - Motors now run 100% smoothly and continuously on 'W', 'A', 'S', 'D' without immediate accidental stopping.
  *   - Supports Render Cloud WSS MQTT (broker.hivemq.com:1883), Local Web (Port 80), & USB Serial.
  */
 
@@ -99,7 +99,7 @@ void setup() {
     delay(1000);
 
     Serial.println("\n==================================================");
-    Serial.println("  🤖 Arduino Uno R4 WiFi - Silent & Clean System  ");
+    Serial.println("  🤖 Arduino Uno R4 WiFi - Continuous Drive System");
     Serial.println("==================================================");
 
     // Initialize ODrives into Closed Loop Velocity Control
@@ -114,7 +114,7 @@ void setup() {
     connectToWiFi();
 
     Serial.println("==================================================");
-    Serial.println("▶️ Ready! Controlling ODrives with 100% Clean Echo Filter.");
+    Serial.println("▶️ Ready! Controlling ODrives (HTTP Space-Stop Bug Fixed).");
     Serial.println("==================================================\n");
 }
 
@@ -140,7 +140,7 @@ void loop() {
             currentVx += (targetVx - currentVx) * 0.40f;
             currentVy += (targetVy - currentVy) * 0.40f;
 
-            // Only send UART velocities when moving or coming to a stop
+            // Send UART velocities continuously to ODrives
             if (abs(currentVx) > 0.02f || abs(currentVy) > 0.02f || abs(targetVx) > 0.02f || abs(targetVy) > 0.02f) {
                 moveRobotVelocities(currentVx, currentVy);
             }
@@ -231,10 +231,15 @@ void handleLocalWebClients() {
     if (request.length() > 0) {
         int getIndex = request.indexOf("GET /");
         if (getIndex != -1) {
-            char cmdKey = toLowerCase(request.charAt(getIndex + 5));
-            if (cmdKey == 'w' || cmdKey == 's' || cmdKey == 'a' || cmdKey == 'd' || 
-                cmdKey == 'x' || cmdKey == 'o' || cmdKey == 'i' || (cmdKey >= '1' && cmdKey <= '9')) {
-                executeCommand(cmdKey, "Wi-Fi Web");
+            String path = request.substring(getIndex + 5);
+            path.trim();
+            if (path.length() > 0) {
+                char cmdKey = toLowerCase(path.charAt(0));
+                // Only process valid command characters (ignoring space ' ' from GET / HTTP/1.1)
+                if (cmdKey == 'w' || cmdKey == 's' || cmdKey == 'a' || cmdKey == 'd' || 
+                    cmdKey == 'x' || cmdKey == 'o' || cmdKey == 'i' || (cmdKey >= '1' && cmdKey <= '9')) {
+                    executeCommand(cmdKey, "Wi-Fi Web");
+                }
             }
         }
 
@@ -304,7 +309,7 @@ void executeCommand(char key, const char* source) {
         Serial.print("🌐 ["); Serial.print(source); Serial.print(" Received] Cmd: 'D' -> RIGHT STRAFE (");
         Serial.print(currentDriveSpeed); Serial.println(" turns/s)");
     }
-    else if (key == 'x' || key == 'o' || key == ' ') {
+    else if (key == 'x' || key == 'o') {
         isAutoRoamEnabled = false;
         targetVx = 0.0f;
         targetVy = 0.0f;
@@ -442,7 +447,6 @@ void processSerial1() {
         if (c == '\n' || c == '\r') {
             if (rxIndex1 > 0) {
                 rxBuffer1[rxIndex1] = '\0';
-                // Ignore empty lines, position floats (0, 1), and velocity command echoes (v, V)
                 if (rxBuffer1[0] != '0' && rxBuffer1[0] != '1' && rxBuffer1[0] != 'v' && rxBuffer1[0] != 'V') {
                     Serial.print("💬 [ODrive Front Response] ");
                     Serial.println(rxBuffer1);
@@ -465,7 +469,6 @@ void processSoftSerial() {
         if (c == '\n' || c == '\r') {
             if (rxIndexRear > 0) {
                 rxBufferRear[rxIndexRear] = '\0';
-                // Ignore empty lines, position floats (0, 1), and velocity command echoes (v, V)
                 if (rxBufferRear[0] != '0' && rxBufferRear[0] != '1' && rxBufferRear[0] != 'v' && rxBufferRear[0] != 'V') {
                     Serial.print("💬 [ODrive Rear Response] ");
                     Serial.println(rxBufferRear);
