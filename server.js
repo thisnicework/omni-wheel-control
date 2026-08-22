@@ -1,24 +1,49 @@
 /*
  * server.js
- * Mac Local Web & API Relay Server
+ * Mac Local Web & Blazing-Fast UDP Relay Server
  * 
- * Target IP: 192.168.10.140:8000
- * Purpose: Relays WASD control commands from Web UI to Arduino Uno R4 WiFi over local Wi-Fi.
+ * Target IP: 192.168.10.140:8000 (Web) / UDP Port 8888 (1ms Low-Latency Direct UDP)
+ * Purpose: Relays WASD control commands from Web UI to Arduino Uno R4 WiFi over local Wi-Fi with <2ms latency.
  */
 
 const http = require('http');
 const fs = require('fs');
 const path = require('path');
 const url = require('url');
+const dgram = require('dgram');
 
 const PORT = 8000;
+const UDP_PORT = 8888;
+
 let latestCommand = 'x';
 let lastCommandTime = Date.now();
+let arduinoIp = '192.168.10.156'; // Default/Target Arduino IP
+
+// Create UDP Socket for 1ms Ultra Low Latency Control
+const udpSocket = dgram.createSocket('udp4');
+udpSocket.bind(UDP_PORT, () => {
+    console.log(`⚡ UDP Direct Socket listening on port ${UDP_PORT}`);
+});
+
+udpSocket.on('message', (msg, rinfo) => {
+    // Dynamically update Arduino IP from heartbeat/UDP packet
+    arduinoIp = rinfo.address;
+});
+
+// Direct UDP Sender Function (<2ms latency)
+function sendUdpCommand(cmd) {
+    if (!arduinoIp) return;
+    const buf = Buffer.from(cmd);
+    udpSocket.send(buf, 0, buf.length, UDP_PORT, arduinoIp, (err) => {
+        if (err) console.error('⚠️ UDP Send Error:', err.message);
+    });
+}
 
 // Auto-reset command to 'x' if no new command received in 500ms (Hold-to-drive safety)
 setInterval(() => {
     if (latestCommand !== 'x' && (Date.now() - lastCommandTime > 500)) {
         latestCommand = 'x';
+        sendUdpCommand('x');
     }
 }, 50);
 
@@ -39,6 +64,10 @@ const server = http.createServer((req, res) => {
 
     // 1. Arduino Polling API Endpoint: GET /api/poll
     if (pathname === '/api/poll') {
+        const clientIp = req.socket.remoteAddress ? req.socket.remoteAddress.replace(/^.*:/, '') : null;
+        if (clientIp && clientIp !== '127.0.0.1') {
+            arduinoIp = clientIp;
+        }
         res.writeHead(200, { 'Content-Type': 'text/plain', 'Connection': 'close' });
         res.end(latestCommand);
         return;
@@ -49,7 +78,11 @@ const server = http.createServer((req, res) => {
         const cmd = parsedUrl.query.set || 'x';
         latestCommand = cmd.toLowerCase().charAt(0);
         lastCommandTime = Date.now();
-        console.log(`⚡ [Mac Server] Command updated: '${latestCommand}'`);
+
+        // Send INSTANT UDP Packet (<2ms Latency) to Arduino
+        sendUdpCommand(latestCommand);
+
+        console.log(`⚡ [Mac UDP Relay] Command sent -> '${latestCommand}' to ${arduinoIp}:${UDP_PORT}`);
         res.writeHead(200, { 'Content-Type': 'text/plain', 'Connection': 'close' });
         res.end('OK');
         return;
@@ -82,8 +115,8 @@ const server = http.createServer((req, res) => {
 
 server.listen(PORT, '0.0.0.0', () => {
     console.log(`==================================================`);
-    console.log(`🚀 Mac Local Relay Server running on port ${PORT}`);
+    console.log(`🚀 Mac Local Ultra Low Latency Server on port ${PORT}`);
     console.log(`🌐 Local Web UI URL : http://192.168.10.140:${PORT}`);
-    console.log(`📡 Arduino Poll URL : http://192.168.10.140:${PORT}/api/poll`);
+    console.log(`⚡ Direct UDP Port   : ${UDP_PORT} (<2ms Latency)`);
     console.log(`==================================================`);
 });

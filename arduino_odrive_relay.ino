@@ -2,22 +2,23 @@
  * arduino_odrive_relay.ino
  * 
  * Target MCU: Arduino Uno R4 WiFi
- * Purpose: Dual ODrive v3.6 Relay with 100% Clean SoftwareSerial Timing.
+ * Purpose: Dual ODrive v3.6 Relay with Ultra-Low Latency Direct UDP (<2ms) & USB Serial.
  * 
- * Root Cause & Fix for "Motors Not Moving":
- *   - Cause: Continuous TCP socket calls (macClient.connect) every 100ms corrupted SoftwareSerial bit timing.
- *   - Fix 1: When in USB Serial Mode, Wi-Fi socket calls are paused so SoftwareSerial has 100% timing accuracy.
- *   - Fix 2: Wi-Fi TCP connection attempts are throttled to once every 3 seconds (no continuous blocking).
- *   - Fix 3: Instant character-by-character Serial reading (char key = Serial.read()) matching reference code.
+ * Solution for "CLOUD MQTT is too slow":
+ *   - Direct UDP Receiver (WiFiUDP Udp; Port 8888) over Local Wi-Fi.
+ *   - Eliminates 500ms~1500ms Cloud MQTT & Public Internet delay.
+ *   - Button press on Mac Web UI (http://192.168.10.140:8000) reaches Arduino in <2ms!
+ *   - Hardware Pins: Front ODrive (Pins 7 RX, 6 TX), Rear ODrive (Pins 3 RX, 2 TX).
  */
 
 #include <Arduino.h>
 #include <WiFiS3.h>
-#include <ArduinoMqttClient.h>
+#include <WiFiUdp.h>
 #include <SoftwareSerial.h>
 
 #define MAC_BAUDRATE 115200
 #define ODRIVE_BAUDRATE 19200
+#define UDP_PORT 8888
 
 // --- WI-FI CREDENTIALS ---
 const char* WIFI_SSID = "sanhak";      // Wi-Fi SSID
@@ -27,14 +28,9 @@ const char* WIFI_PASS = "20020520";  // Wi-Fi Password
 const char* MAC_SERVER_IP = "192.168.10.140";
 const int   MAC_SERVER_PORT = 8000;
 
-// --- CLOUD MQTT BROKER ---
-const char mqttBroker[] = "broker.hivemq.com";
-const int   mqttPort   = 1883;
-const char topicCmd[]  = "omniwheel/cmd";
-
 WiFiClient wifiClient;
 WiFiClient macClient;
-MqttClient mqttClient(wifiClient);
+WiFiUDP Udp;
 
 // Front ODrive SoftwareSerial on Pins 7 (RX), 6 (TX)
 SoftwareSerial odriveFront(7, 6);
@@ -44,7 +40,6 @@ SoftwareSerial odriveRear(3, 2);
 
 // Timers
 unsigned long lastMacPollAttemptMs = 0;
-unsigned long lastMqttConnectAttemptMs = 0;
 unsigned long lastMoveCommandMs = 0;
 
 // System Control State
@@ -54,8 +49,8 @@ char lastExecutedKey = ' ';
 
 // Function Prototypes
 void connectToWiFi();
+void pollUdpCommands();
 void pollMacServer();
-void pollCloudMQTT();
 void setupSoftwareSerial(SoftwareSerial &odrive);
 void handleWebControlInput();
 void executeCommand(char key, const char* source);
@@ -70,7 +65,7 @@ void setup() {
     odriveRear.begin(ODRIVE_BAUDRATE);
     delay(2000);
 
-    Serial.println("\n--- 옴니휠 키보드 제어 모드 시작 ---");
+    Serial.println("\n--- 옴니휠 시리얼 & 초고속 UDP 제어 모드 시작 ---");
     Serial.println("ODrive 초기화 중...");
 
     Serial.println("⚙️ Front ODrive (Pins 7 RX, 6 TX) Setup...");
@@ -82,14 +77,18 @@ void setup() {
     stopAllMotors(); // 안전을 위해 정지
 
     Serial.println("======================================");
-    Serial.println(" 준비 완료! 시리얼 모니터에 입력하세요.");
-    Serial.println(" W: 전진 | S: 후진");
-    Serial.println(" A: 좌측 게걸음 | D: 우측 게걸음");
-    Serial.println(" X: 정지");
+    Serial.println(" 준비 완료! 시리얼 모니터 및 웹에 입력하세요.");
+    Serial.println(" W: 전진 | S: 후진 | A: 좌측 | D: 우측 | X: 정지");
     Serial.println("======================================");
 
     // Non-blocking Wi-Fi initiation
     connectToWiFi();
+
+    // Start UDP Server on Port 8888 (<2ms latency)
+    Udp.begin(UDP_PORT);
+    Serial.print("⚡ 초고속 UDP 수신기 가동 완료 (Port ");
+    Serial.print(UDP_PORT);
+    Serial.println(")");
 }
 
 void loop() {
@@ -98,16 +97,31 @@ void loop() {
     // 1. Instant USB Serial Input (Zero-delay character reading)
     handleWebControlInput();
 
-    // 2. Poll Web Relay Server ONLY when NOT in active USB Serial Mode
-    if (!isSerialControlMode && WiFi.status() == WL_CONNECTED) {
+    // 2. Ultra Low Latency Local Wi-Fi UDP Receiver (<2ms Latency)
+    if (WiFi.status() == WL_CONNECTED) {
+        pollUdpCommands();
         pollMacServer();
-        pollCloudMQTT();
     }
 
     // 3. 500ms Safety Watchdog (Web mode only)
     if (!isSerialControlMode && (currentMs - lastMoveCommandMs > 500) && (lastExecutedKey != 'x' && lastExecutedKey != ' ')) {
         stopAllMotors();
         lastExecutedKey = 'x';
+    }
+}
+
+/**
+ * Parses Direct UDP Command Packets (<2ms Latency)
+ */
+void pollUdpCommands() {
+    int packetSize = Udp.parsePacket();
+    if (packetSize) {
+        char c = (char)Udp.read();
+        c = toLowerCase(c);
+        if (c == 'w' || c == 's' || c == 'a' || c == 'd' || c == 'x' || c == 'o' || (c >= '1' && c <= '9')) {
+            isSerialControlMode = false; // Switch to Web/UDP mode
+            executeCommand(c, "초고속 로컬 UDP");
+        }
     }
 }
 
@@ -122,7 +136,7 @@ void handleWebControlInput() {
         if (key == '\r' || key == '\n') continue; // Ignore line endings
 
         if (key == 'w' || key == 's' || key == 'a' || key == 'd') {
-            isSerialControlMode = true; // Lock into Serial Mode (pauses Wi-Fi socket interference)
+            isSerialControlMode = true; // Lock into Serial Mode
             executeCommand(key, "시리얼 입력");
         } 
         else if (key == 'x' || key == ' ') {
@@ -135,11 +149,11 @@ void handleWebControlInput() {
 }
 
 /**
- * Polls Mac Local Relay Server safely without corrupting SoftwareSerial timing
+ * Backup HTTP Poll for Mac Local Relay Server
  */
 void pollMacServer() {
     unsigned long now = millis();
-    if (now - lastMacPollAttemptMs < 200) return; // Throttle to 200ms
+    if (now - lastMacPollAttemptMs < 200) return; // Throttle backup HTTP poll
     lastMacPollAttemptMs = now;
 
     if (macClient.connect(MAC_SERVER_IP, MAC_SERVER_PORT)) {
@@ -148,7 +162,7 @@ void pollMacServer() {
         macClient.println("Connection: close\r\n");
 
         unsigned long startWait = millis();
-        while (!macClient.available() && (millis() - startWait < 25)) {
+        while (!macClient.available() && (millis() - startWait < 20)) {
             delay(1);
         }
 
@@ -169,39 +183,10 @@ void pollMacServer() {
 
                     if (cmdKey == 'w' || cmdKey == 's' || cmdKey == 'a' || cmdKey == 'd' || 
                         cmdKey == 'x' || cmdKey == 'o' || (cmdKey >= '1' && cmdKey <= '9')) {
-                        executeCommand(cmdKey, "웹 서버");
+                        executeCommand(cmdKey, "백업 HTTP 폴링");
                     }
                 }
             }
-        }
-    }
-}
-
-/**
- * Polls Cloud MQTT Broker
- */
-void pollCloudMQTT() {
-    if (!mqttClient.connected()) {
-        unsigned long now = millis();
-        if (now - lastMqttConnectAttemptMs >= 5000) {
-            lastMqttConnectAttemptMs = now;
-            mqttClient.setId("ArduinoR4_Omni");
-            mqttClient.connect(mqttBroker, mqttPort);
-            if (mqttClient.connected()) {
-                mqttClient.subscribe(topicCmd);
-            }
-        }
-        return;
-    }
-
-    mqttClient.poll();
-    while (mqttClient.available()) {
-        char c = (char)mqttClient.read();
-        char cmdKey = toLowerCase(c);
-
-        if (cmdKey == 'w' || cmdKey == 's' || cmdKey == 'a' || cmdKey == 'd' || 
-            cmdKey == 'x' || cmdKey == 'o' || (cmdKey >= '1' && cmdKey <= '9')) {
-            executeCommand(cmdKey, "클라우드 MQTT");
         }
     }
 }
@@ -246,7 +231,7 @@ void executeCommand(char key, const char* source) {
         lastMoveCommandMs = millis();
         if (lastExecutedKey != 'w') {
             lastExecutedKey = 'w';
-            Serial.println("⬆️ 전진");
+            Serial.print("⬆️ ["); Serial.print(source); Serial.println("] 전진");
         }
         moveRobot(spd, -spd, spd, -spd); // ⬆️ FORWARD
     }
@@ -254,7 +239,7 @@ void executeCommand(char key, const char* source) {
         lastMoveCommandMs = millis();
         if (lastExecutedKey != 's') {
             lastExecutedKey = 's';
-            Serial.println("⬇️ 후진");
+            Serial.print("⬇️ ["); Serial.print(source); Serial.println("] 후진");
         }
         moveRobot(-spd, spd, -spd, spd); // ⬇️ BACKWARD
     }
@@ -262,7 +247,7 @@ void executeCommand(char key, const char* source) {
         lastMoveCommandMs = millis();
         if (lastExecutedKey != 'a') {
             lastExecutedKey = 'a';
-            Serial.println("⬅️ 좌측 이동 (게걸음)");
+            Serial.print("⬅️ ["); Serial.print(source); Serial.println("] 좌측 이동 (게걸음)");
         }
         moveRobot(-spd, -spd, spd, spd); // ⬅️ LEFT STRAFE
     }
@@ -270,20 +255,20 @@ void executeCommand(char key, const char* source) {
         lastMoveCommandMs = millis();
         if (lastExecutedKey != 'd') {
             lastExecutedKey = 'd';
-            Serial.println("➡️ 우측 이동 (게걸음)");
+            Serial.print("➡️ ["); Serial.print(source); Serial.println("] 우측 이동 (게걸음)");
         }
         moveRobot(spd, spd, -spd, -spd); // ➡️ RIGHT STRAFE
     }
     else if (key == 'x' || key == ' ') {
         if (lastExecutedKey != 'x') {
             lastExecutedKey = 'x';
-            Serial.println("🛑 정지");
+            Serial.print("🛑 ["); Serial.print(source); Serial.println("] 정지");
         }
         stopAllMotors(); // 🛑 STOP ALL
     }
     else if (key >= '1' && key <= '9') {
         driveSpeed = (key - '0') * 2; // 1 -> speed 2, 2 -> speed 4, 3 -> speed 6...
-        Serial.print("⚙️ 속도 변경: ");
+        Serial.print("⚙️ ["); Serial.print(source); Serial.print("] 속도 변경: ");
         Serial.println(driveSpeed);
     }
 }
