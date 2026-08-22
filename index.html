@@ -4,8 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
     <title>Omni-Wheel Cyberpunk Controller</title>
-    <!-- MQTT.js Cloud Library -->
-    <script src="https://unpkg.com/mqtt/dist/mqtt.min.js"></script>
+    <!-- No external dependencies needed - pure local HTTP -->
     <style>
         :root {
             --bg-dark: #05080c;
@@ -306,7 +305,7 @@
 
         <div id="status-badge" class="status-badge">
             <span class="status-dot"></span>
-            <span id="status-text">CONNECTING CLOUD...</span>
+            <span id="status-text">CONNECTING LOCAL...</span>
         </div>
 
         <!-- Speed Level Selection Bar -->

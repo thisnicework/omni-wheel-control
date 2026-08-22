@@ -1,10 +1,15 @@
 /*
  * app.js
- * Omni-wheel Robot Controller Engine
+ * Omni-wheel Robot Controller Engine (Ultra-Low Latency Local HTTP)
  * 
- * Continuous Hold-To-Drive Pulse System (150ms):
- *   - While button or key is held down, sends heartbeat pulse every 150ms.
- *   - Releases button or key -> Clears interval & sends instant STOP 'x'.
+ * Architecture:
+ *   - PRIMARY: Mac Local HTTP Server (http://192.168.10.140:8000/api/cmd)
+ *   - BACKUP: USB Web Serial API (Chrome only, cable connection)
+ *   - NO MQTT, NO Cloud. Pure local network for instant response.
+ * 
+ * Continuous Hold-To-Drive Pulse System (100ms):
+ *   - While button or key is held down, sends heartbeat pulse every 100ms.
+ *   - Release -> Clears interval & sends instant STOP 'x'.
  */
 
 // ==========================================
@@ -95,54 +100,41 @@ class SerialController {
 
 
 // ==========================================
-// 2. CLOUD MQTT WSS CONTROLLER (RENDER HTTPS)
+// 2. LOCAL HTTP API CONTROLLER (PRIMARY)
 // ==========================================
-class CloudMqttWssController {
+class LocalHttpController {
     constructor(onStatusChange) {
         this.onStatusChange = onStatusChange;
-        this.client = null;
         this.isConnected = false;
-        this.connect();
+        this.checkConnection();
     }
 
-    connect() {
-        console.log('[Cloud MQTT WSS] Connecting to WSS Cloud Broker (broker.hivemq.com:8884)...');
-        try {
-            if (typeof mqtt === 'undefined') {
-                console.warn('MQTT.js library not loaded yet');
-                return;
-            }
-            this.client = mqtt.connect('wss://broker.hivemq.com:8884/mqtt', {
-                clientId: 'OmniWeb_' + Math.random().toString(16).substr(2, 8),
-                clean: true,
-                connectTimeout: 5000,
-                reconnectPeriod: 2500
-            });
-
-            this.client.on('connect', () => {
-                console.log('✅ [Cloud MQTT WSS] Connected to WSS Cloud Broker!');
+    checkConnection() {
+        fetch('/api/status')
+            .then(resp => resp.json())
+            .then(data => {
                 this.isConnected = true;
-                if (this.onStatusChange) this.onStatusChange(true, 'CLOUD MQTT ACTIVE');
-            });
-
-            this.client.on('offline', () => {
+                if (this.onStatusChange) {
+                    this.onStatusChange(true, 'LOCAL HTTP ACTIVE');
+                }
+            })
+            .catch(err => {
                 this.isConnected = false;
-                if (this.onStatusChange) this.onStatusChange(false, 'CLOUD OFFLINE');
+                if (this.onStatusChange) {
+                    this.onStatusChange(false, 'SERVER OFFLINE');
+                }
+                // Retry in 3 seconds
+                setTimeout(() => this.checkConnection(), 3000);
             });
-
-            this.client.on('error', (err) => {
-                console.warn('[Cloud MQTT Error]', err);
-            });
-        } catch (e) {
-            console.error('[Cloud MQTT Exception]', e);
-        }
     }
 
     send(cmd) {
-        if (this.client && this.isConnected) {
-            this.client.publish('omniwheel/cmd', cmd);
-            console.log(`⚡ [Cloud MQTT Published] Sent '${cmd}' to omniwheel/cmd`);
-        }
+        fetch('/api/cmd?set=' + cmd).catch(() => {
+            this.isConnected = false;
+            if (this.onStatusChange) {
+                this.onStatusChange(false, 'SERVER OFFLINE');
+            }
+        });
     }
 }
 
@@ -151,9 +143,9 @@ class CloudMqttWssController {
 // 3. MULTI-CHANNEL CONTROL DISPATCHER
 // ==========================================
 class RobotControlDispatcher {
-    constructor(serialController, cloudMqttController, statusBadge, statusText) {
+    constructor(serialController, localHttpController, statusBadge, statusText) {
         this.serialController = serialController;
-        this.cloudMqttController = cloudMqttController;
+        this.localHttpController = localHttpController;
         this.statusBadge = statusBadge;
         this.statusText = statusText;
         this.lastCmd = null;
@@ -174,18 +166,15 @@ class RobotControlDispatcher {
     send(cmd) {
         this.lastCmd = cmd;
 
-        // Path 1: Cloud MQTT WSS (Render HTTPS)
-        if (this.cloudMqttController) {
-            this.cloudMqttController.send(cmd);
+        // Path 1: Local HTTP API (Primary, <5ms)
+        if (this.localHttpController) {
+            this.localHttpController.send(cmd);
         }
 
-        // Path 2: USB Web Serial (Local Cable Backup)
+        // Path 2: USB Web Serial (Backup, cable only)
         if (this.serialController && this.serialController.port) {
             this.serialController.send(cmd);
         }
-
-        // Path 3: Render REST API Backup (/api/cmd?set=w)
-        fetch('/api/cmd?set=' + cmd).catch(() => {});
     }
 }
 
@@ -213,11 +202,11 @@ document.addEventListener('DOMContentLoaded', () => {
         dispatcher.updateStatus(isConnected, label);
     });
 
-    const cloudMqttController = new CloudMqttWssController((isConnected, label) => {
+    const localHttpController = new LocalHttpController((isConnected, label) => {
         dispatcher.updateStatus(isConnected, label);
     });
 
-    const dispatcher = new RobotControlDispatcher(serialController, cloudMqttController, statusBadge, statusText);
+    const dispatcher = new RobotControlDispatcher(serialController, localHttpController, statusBadge, statusText);
 
     // Speed Pill Click Handler
     speedPills.forEach(pill => {
@@ -253,13 +242,13 @@ document.addEventListener('DOMContentLoaded', () => {
         // Immediate first pulse
         dispatcher.send(cmd);
 
-        // Continuous 150ms heartbeat pulses while held down
+        // Continuous 100ms heartbeat pulses while held down
         if (holdPulseTimer) clearInterval(holdPulseTimer);
         holdPulseTimer = setInterval(() => {
             if (currentHoldingCmd) {
                 dispatcher.send(currentHoldingCmd);
             }
-        }, 150);
+        }, 100);
     }
 
     function stopHoldPulse(element) {

@@ -2,35 +2,31 @@
  * arduino_odrive_relay.ino
  * 
  * Target MCU: Arduino Uno R4 WiFi
- * Purpose: Dual ODrive v3.6 Relay with Ultra-Low Latency Direct UDP (<2ms) & USB Serial.
+ * Purpose: Dual ODrive v3.6 Relay with Reliable HTTP Poll + USB Serial Control.
  * 
- * Solution for "CLOUD MQTT is too slow":
- *   - Direct UDP Receiver (WiFiUDP Udp; Port 8888) over Local Wi-Fi.
- *   - Eliminates 500ms~1500ms Cloud MQTT & Public Internet delay.
- *   - Button press on Mac Web UI (http://192.168.10.140:8000) reaches Arduino in <2ms!
- *   - Hardware Pins: Front ODrive (Pins 7 RX, 6 TX), Rear ODrive (Pins 3 RX, 2 TX).
+ * Architecture:
+ *   - USB Serial: Instant char-by-char 'w','s','a','d','x' control (no line-ending dependency)
+ *   - HTTP Poll: Arduino polls Mac server (http://192.168.10.140:8000/api/poll) every 100ms
+ *   - No UDP, no MQTT. Simple, reliable, and proven to work.
+ *   - Hardware Pins: Front ODrive (Pins 7 RX, 6 TX), Rear ODrive (Pins 3 RX, 2 TX)
  */
 
 #include <Arduino.h>
 #include <WiFiS3.h>
-#include <WiFiUdp.h>
 #include <SoftwareSerial.h>
 
 #define MAC_BAUDRATE 115200
 #define ODRIVE_BAUDRATE 19200
-#define UDP_PORT 8888
 
 // --- WI-FI CREDENTIALS ---
-const char* WIFI_SSID = "sanhak";      // Wi-Fi SSID
-const char* WIFI_PASS = "20020520";  // Wi-Fi Password
+const char* WIFI_SSID = "sanhak";
+const char* WIFI_PASS = "20020520";
 
 // --- MAC LOCAL RELAY SERVER ---
 const char* MAC_SERVER_IP = "192.168.10.140";
 const int   MAC_SERVER_PORT = 8000;
 
-WiFiClient wifiClient;
 WiFiClient macClient;
-WiFiUDP Udp;
 
 // Front ODrive SoftwareSerial on Pins 7 (RX), 6 (TX)
 SoftwareSerial odriveFront(7, 6);
@@ -39,23 +35,22 @@ SoftwareSerial odriveFront(7, 6);
 SoftwareSerial odriveRear(3, 2);
 
 // Timers
-unsigned long lastMacPollAttemptMs = 0;
+unsigned long lastPollMs = 0;
 unsigned long lastMoveCommandMs = 0;
 
 // System Control State
-bool isSerialControlMode = true; // Default to USB Serial Mode for immediate startup
-int driveSpeed = 2; // Default speed 2 turns/sec (matches working reference code)
+bool isSerialControlMode = true;
+int driveSpeed = 2;
 char lastExecutedKey = ' ';
 
 // Function Prototypes
 void connectToWiFi();
-void pollUdpCommands();
 void pollMacServer();
-void setupSoftwareSerial(SoftwareSerial &odrive);
-void handleWebControlInput();
+void handleSerialInput();
 void executeCommand(char key, const char* source);
 void moveRobot(int fl, int fr, int rl, int rr);
 void stopAllMotors();
+void setupSoftwareSerial(SoftwareSerial &odrive);
 
 void setup() {
     Serial.begin(MAC_BAUDRATE);
@@ -65,126 +60,116 @@ void setup() {
     odriveRear.begin(ODRIVE_BAUDRATE);
     delay(2000);
 
-    Serial.println("\n--- 옴니휠 시리얼 & 초고속 UDP 제어 모드 시작 ---");
+    Serial.println("\n--- 옴니휠 키보드 제어 모드 시작 ---");
     Serial.println("ODrive 초기화 중...");
 
-    Serial.println("⚙️ Front ODrive (Pins 7 RX, 6 TX) Setup...");
     setupSoftwareSerial(odriveFront);
-
-    Serial.println("⚙️ Rear ODrive (Pins 3 RX, 2 TX) Setup...");
     setupSoftwareSerial(odriveRear);
 
-    stopAllMotors(); // 안전을 위해 정지
+    stopAllMotors();
 
     Serial.println("======================================");
-    Serial.println(" 준비 완료! 시리얼 모니터 및 웹에 입력하세요.");
-    Serial.println(" W: 전진 | S: 후진 | A: 좌측 | D: 우측 | X: 정지");
+    Serial.println(" 준비 완료! 시리얼 모니터에 입력하세요.");
+    Serial.println(" W: 전진 | S: 후진");
+    Serial.println(" A: 좌측 게걸음 | D: 우측 게걸음");
+    Serial.println(" X: 정지");
     Serial.println("======================================");
 
-    // Non-blocking Wi-Fi initiation
     connectToWiFi();
-
-    // Start UDP Server on Port 8888 (<2ms latency)
-    Udp.begin(UDP_PORT);
-    Serial.print("⚡ 초고속 UDP 수신기 가동 완료 (Port ");
-    Serial.print(UDP_PORT);
-    Serial.println(")");
 }
 
 void loop() {
-    unsigned long currentMs = millis();
+    unsigned long now = millis();
 
-    // 1. Instant USB Serial Input (Zero-delay character reading)
-    handleWebControlInput();
+    // 1. Instant USB Serial Input
+    handleSerialInput();
 
-    // 2. Ultra Low Latency Local Wi-Fi UDP Receiver (<2ms Latency)
-    if (WiFi.status() == WL_CONNECTED) {
-        pollUdpCommands();
-        pollMacServer();
+    // 2. HTTP Poll Mac Server (only when not in serial control mode)
+    if (!isSerialControlMode && WiFi.status() == WL_CONNECTED) {
+        if (now - lastPollMs >= 100) {
+            lastPollMs = now;
+            pollMacServer();
+        }
     }
 
-    // 3. 500ms Safety Watchdog (Web mode only)
-    if (!isSerialControlMode && (currentMs - lastMoveCommandMs > 500) && (lastExecutedKey != 'x' && lastExecutedKey != ' ')) {
+    // 3. Deadman watchdog (web mode only)
+    if (!isSerialControlMode && (now - lastMoveCommandMs > 500) && lastExecutedKey != 'x') {
         stopAllMotors();
         lastExecutedKey = 'x';
     }
 }
 
 /**
- * Parses Direct UDP Command Packets (<2ms Latency)
+ * Instant character-by-character Serial input (matches proven reference code)
  */
-void pollUdpCommands() {
-    int packetSize = Udp.parsePacket();
-    if (packetSize) {
-        char c = (char)Udp.read();
-        c = toLowerCase(c);
-        if (c == 'w' || c == 's' || c == 'a' || c == 'd' || c == 'x' || c == 'o' || (c >= '1' && c <= '9')) {
-            isSerialControlMode = false; // Switch to Web/UDP mode
-            executeCommand(c, "초고속 로컬 UDP");
-        }
-    }
-}
-
-/**
- * Handles Incoming Input from USB Serial Monitor Character-by-Character
- */
-void handleWebControlInput() {
+void handleSerialInput() {
     while (Serial.available() > 0) {
-        char key = (char)Serial.read(); // Read single character instantly
+        char key = (char)Serial.read();
         key = toLowerCase(key);
 
-        if (key == '\r' || key == '\n') continue; // Ignore line endings
+        if (key == '\r' || key == '\n') continue;
 
         if (key == 'w' || key == 's' || key == 'a' || key == 'd') {
-            isSerialControlMode = true; // Lock into Serial Mode
-            executeCommand(key, "시리얼 입력");
+            isSerialControlMode = true;
+            executeCommand(key, "시리얼");
         } 
         else if (key == 'x' || key == ' ') {
-            executeCommand('x', "시리얼 입력");
+            isSerialControlMode = false;
+            executeCommand('x', "시리얼");
         } 
         else if (key >= '1' && key <= '9') {
-            executeCommand(key, "시리얼 입력");
+            executeCommand(key, "시리얼");
         }
     }
 }
 
 /**
- * Backup HTTP Poll for Mac Local Relay Server
+ * Poll Mac Local Relay Server
  */
 void pollMacServer() {
-    unsigned long now = millis();
-    if (now - lastMacPollAttemptMs < 200) return; // Throttle backup HTTP poll
-    lastMacPollAttemptMs = now;
+    if (!macClient.connect(MAC_SERVER_IP, MAC_SERVER_PORT)) {
+        return; // Connection failed, skip this cycle
+    }
 
-    if (macClient.connect(MAC_SERVER_IP, MAC_SERVER_PORT)) {
-        macClient.println("GET /api/poll HTTP/1.1");
-        macClient.print("Host: "); macClient.println(MAC_SERVER_IP);
-        macClient.println("Connection: close\r\n");
+    macClient.println("GET /api/poll HTTP/1.1");
+    macClient.print("Host: "); macClient.println(MAC_SERVER_IP);
+    macClient.println("Connection: close");
+    macClient.println();
 
-        unsigned long startWait = millis();
-        while (!macClient.available() && (millis() - startWait < 20)) {
-            delay(1);
-        }
+    // Wait for response (max 30ms)
+    unsigned long startWait = millis();
+    while (!macClient.available() && (millis() - startWait < 30)) {
+        delay(1);
+    }
 
-        String response = "";
-        while (macClient.available()) {
-            char c = macClient.read();
-            response += c;
-        }
-        macClient.stop();
+    // Read response
+    String response = "";
+    while (macClient.available()) {
+        response += (char)macClient.read();
+    }
+    macClient.stop();
 
-        if (response.length() > 0) {
-            int lastNewline = response.lastIndexOf('\n');
-            if (lastNewline != -1 && lastNewline < response.length() - 1) {
-                String payload = response.substring(lastNewline + 1);
-                payload.trim();
-                if (payload.length() > 0) {
-                    char cmdKey = toLowerCase(payload.charAt(0));
+    // Parse: last line of HTTP response is the command body
+    if (response.length() > 0) {
+        int lastNewline = response.lastIndexOf('\n');
+        if (lastNewline >= 0 && lastNewline < (int)response.length() - 1) {
+            String payload = response.substring(lastNewline + 1);
+            payload.trim();
+            if (payload.length() > 0) {
+                char cmdKey = toLowerCase(payload.charAt(0));
 
-                    if (cmdKey == 'w' || cmdKey == 's' || cmdKey == 'a' || cmdKey == 'd' || 
-                        cmdKey == 'x' || cmdKey == 'o' || (cmdKey >= '1' && cmdKey <= '9')) {
-                        executeCommand(cmdKey, "백업 HTTP 폴링");
-                    }
+                // Skip 'x' from server when in serial mode
+                if (isSerialControlMode && (cmdKey == 'x' || cmdKey == 'o')) {
+                    return;
+                }
+
+                if (cmdKey == 'w' || cmdKey == 's' || cmdKey == 'a' || cmdKey == 'd') {
+                    isSerialControlMode = false;
+                    executeCommand(cmdKey, "웹");
+                } else if (cmdKey == 'x' || cmdKey == 'o') {
+                    executeCommand('x', "웹");
+                } else if (cmdKey >= '1' && cmdKey <= '9') {
+                    executeCommand(cmdKey, "웹");
                 }
             }
         }
@@ -192,10 +177,13 @@ void pollMacServer() {
 }
 
 /**
- * Non-blocking Wi-Fi Connection
+ * Wi-Fi Connection
  */
 void connectToWiFi() {
-    if (WiFi.status() == WL_NO_MODULE) return;
+    if (WiFi.status() == WL_NO_MODULE) {
+        Serial.println("❌ Wi-Fi 모듈 없음!");
+        return;
+    }
 
     WiFi.disconnect();
     delay(200);
@@ -206,23 +194,23 @@ void connectToWiFi() {
     WiFi.begin(WIFI_SSID, WIFI_PASS);
     
     int attempts = 0;
-    while (WiFi.status() != WL_CONNECTED && attempts < 10) {
-        delay(300);
+    while (WiFi.status() != WL_CONNECTED && attempts < 15) {
+        delay(400);
         Serial.print(".");
         attempts++;
     }
 
     if (WiFi.status() == WL_CONNECTED) {
         Serial.println("\n✅ Wi-Fi 연결 완료!");
-        Serial.print("🌐 IP 주소: ");
+        Serial.print("🌐 Arduino IP: ");
         Serial.println(WiFi.localIP());
     } else {
-        Serial.println("\n⚠️ Wi-Fi 연결 안됨 (시리얼 전용 모드로 동작)");
+        Serial.println("\n⚠️ Wi-Fi 연결 안됨 (시리얼 전용 모드)");
     }
 }
 
 /**
- * Central Command Executor - Direct Wheel Movement
+ * Central Command Executor
  */
 void executeCommand(char key, const char* source) {
     int spd = driveSpeed;
@@ -233,7 +221,7 @@ void executeCommand(char key, const char* source) {
             lastExecutedKey = 'w';
             Serial.print("⬆️ ["); Serial.print(source); Serial.println("] 전진");
         }
-        moveRobot(spd, -spd, spd, -spd); // ⬆️ FORWARD
+        moveRobot(spd, -spd, spd, -spd);
     }
     else if (key == 's') {
         lastMoveCommandMs = millis();
@@ -241,57 +229,54 @@ void executeCommand(char key, const char* source) {
             lastExecutedKey = 's';
             Serial.print("⬇️ ["); Serial.print(source); Serial.println("] 후진");
         }
-        moveRobot(-spd, spd, -spd, spd); // ⬇️ BACKWARD
+        moveRobot(-spd, spd, -spd, spd);
     }
     else if (key == 'a') {
         lastMoveCommandMs = millis();
         if (lastExecutedKey != 'a') {
             lastExecutedKey = 'a';
-            Serial.print("⬅️ ["); Serial.print(source); Serial.println("] 좌측 이동 (게걸음)");
+            Serial.print("⬅️ ["); Serial.print(source); Serial.println("] 좌측 이동");
         }
-        moveRobot(-spd, -spd, spd, spd); // ⬅️ LEFT STRAFE
+        moveRobot(-spd, -spd, spd, spd);
     }
     else if (key == 'd') {
         lastMoveCommandMs = millis();
         if (lastExecutedKey != 'd') {
             lastExecutedKey = 'd';
-            Serial.print("➡️ ["); Serial.print(source); Serial.println("] 우측 이동 (게걸음)");
+            Serial.print("➡️ ["); Serial.print(source); Serial.println("] 우측 이동");
         }
-        moveRobot(spd, spd, -spd, -spd); // ➡️ RIGHT STRAFE
+        moveRobot(spd, spd, -spd, -spd);
     }
     else if (key == 'x' || key == ' ') {
         if (lastExecutedKey != 'x') {
             lastExecutedKey = 'x';
             Serial.print("🛑 ["); Serial.print(source); Serial.println("] 정지");
         }
-        stopAllMotors(); // 🛑 STOP ALL
+        stopAllMotors();
     }
     else if (key >= '1' && key <= '9') {
-        driveSpeed = (key - '0') * 2; // 1 -> speed 2, 2 -> speed 4, 3 -> speed 6...
-        Serial.print("⚙️ ["); Serial.print(source); Serial.print("] 속도 변경: ");
+        driveSpeed = (key - '0') * 2;
+        Serial.print("⚙️ ["); Serial.print(source); Serial.print("] 속도: ");
         Serial.println(driveSpeed);
     }
 }
 
 /**
- * Omniwheel Drive Kinematics with 10ms Delays
+ * Omniwheel Kinematics (10ms inter-command delay)
  */
 void moveRobot(int fl, int fr, int rl, int rr) {
-    // Front Wheels (odriveFront: Pins 7 RX, 6 TX)
-    odriveFront.print("v 0 "); odriveFront.println(fl); // 2사분면 (FL)
+    odriveFront.print("v 0 "); odriveFront.println(fl);
     delay(10);
-    odriveFront.print("v 1 "); odriveFront.println(fr); // 1사분면 (FR)
+    odriveFront.print("v 1 "); odriveFront.println(fr);
     delay(10);
-
-    // Rear Wheels (odriveRear: Pins 3 RX, 2 TX)
-    odriveRear.print("v 1 "); odriveRear.println(rl); // 3사분면 (RL)
+    odriveRear.print("v 1 "); odriveRear.println(rl);
     delay(10);
-    odriveRear.print("v 0 "); odriveRear.println(rr); // 4사분면 (RR)
+    odriveRear.print("v 0 "); odriveRear.println(rr);
     delay(10);
 }
 
 /**
- * Safe Motor Stop Function
+ * Motor Stop
  */
 void stopAllMotors() {
     odriveFront.println("v 0 0"); delay(10);
@@ -301,7 +286,7 @@ void stopAllMotors() {
 }
 
 /**
- * ODrive Setup Function with 200ms Delays
+ * ODrive Setup (200ms delays)
  */
 void setupSoftwareSerial(SoftwareSerial &odrive) {
     odrive.println("c 0"); delay(200);
